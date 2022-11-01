@@ -112,3 +112,12 @@ def add_maskformer2_config(cfg):
     # Importance sampling parameter for PointRend point sampling during training. Parametr `beta` in
     # the original paper.
     cfg.MODEL.MASK_FORMER.IMPORTANCE_SAMPLE_RATIO = 0.75
+
+    # instance segemntation with box supervision
+    cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION = CN()
+
+    cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.ENABLED = False
+    cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.BBOX_WEIGHT = 5.0
+    cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.GIOU_WEIGHT = 2.0
+    cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_PROJECTION_WEIGHT = 2.0
+    cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE_WEIGHT = 5.0
