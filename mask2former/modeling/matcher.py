@@ -3,6 +3,9 @@
 """
 Modules to compute the matching cost and solve the corresponding LSAP.
 """
+import cv2
+import numpy as np
+
 import torch
 import torch.nn.functional as F
 from scipy.optimize import linear_sum_assignment
@@ -167,6 +170,15 @@ class HungarianMatcherBox(nn.Module):
                 else:
                     rel_out_box = torch.zeros(4, dtype=torch.float, device=out_mask.device)
                 rel_out_boxes[ins_idx, :] = rel_out_box
+
+                save_mask = ((ins_mask > 0).int() * 255).cpu().numpy()
+                cv2.rectangle(
+                    save_mask,
+                    (int(xs.min().cpu()), int(ys.min().cpu())),
+                    (int(xs.max().cpu()), int(ys.max().cpu())),
+                    (0, 0, 255)
+                )
+                cv2.imwrite('debug/matcher/pred_ins_{}_bm.png'.format(ins_idx), save_mask)
 
             # Compute bounding box L2 cost.
             cost_bbox = torch.cdist(rel_out_boxes, tgt_bboxes)  # (num_query, num_gt)

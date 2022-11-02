@@ -159,7 +159,7 @@ class MaskFormer(nn.Module):
                 importance_sample_ratio=cfg.MODEL.MASK_FORMER.IMPORTANCE_SAMPLE_RATIO,
             )
         else:
-            criterion = VideoSetCriterionWeakSup(
+            criterion = SetCriterionWeakSup(
                 sem_seg_head.num_classes,
                 matcher=matcher,
                 weight_dict=weight_dict,
@@ -334,9 +334,9 @@ class MaskFormer(nn.Module):
                 assert len(gt_boxes) == gt_masks.shape[0]
                 for ins_idx in range(len(gt_boxes)):
                     org_mask = gt_masks[ins_idx].cpu().numpy()
-                    cv2.imwirte('debug/pt_ins_{}_org_mask.png'.format(ins_idx), org_mask)
+                    cv2.imwirte('debug/model/gt_ins_{}_org_mask.png'.format(ins_idx), org_mask)
                     box_mask = box_masks_full_per_image.cpu().numpy()
-                    cv2.imwirte('debug/pt_ins_{}_box_mask.png'.format(ins_idx), box_mask)
+                    cv2.imwirte('debug/model/gt_ins_{}_box_mask.png'.format(ins_idx), box_mask)
 
                 new_targets.append(
                     {
