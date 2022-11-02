@@ -153,11 +153,11 @@ class HungarianMatcherBox(nn.Module):
 
             # Prepare output and target bounding boxes.
             # Use the predicted mask to find tight bounding boxes to calculate box cost.
-            tgt_bboxes = targets[b]["boxes"]  # (num_gt, 4)
+            tgt_bboxes = targets[b]["bboxes"]  # (num_gt, 4), relative coordinates
             out_mask = outputs["pred_masks"][b]  # [num_queries, H_pred, W_pred]
 
-            rel_out_boxes = torch.zeros_like((out_mask.shape[0], 4), dtype = torch.float, device=out_mask.device)
-            h_out, w_out = float(out_mask.shape[2]), float(out_mask.shape[3])
+            rel_out_boxes = torch.zeros((out_mask.shape[0], 4), dtype = torch.float, device=out_mask.device)
+            h_out, w_out = float(out_mask.shape[1]), float(out_mask.shape[2])
             for ins_idx in range(out_mask.shape[0]):
                 ins_mask = out_mask[ins_idx, :, :]
                 (ys, xs) = torch.where(ins_mask > 0)

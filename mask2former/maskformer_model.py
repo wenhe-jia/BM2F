@@ -222,6 +222,9 @@ class MaskFormer(nn.Module):
                     segments_info (list[dict]): Describe each segment in `panoptic_seg`.
                         Each dict contains keys "id", "category_id", "isthing".
         """
+        print(batched_inputs[0]['image'])
+        # cv2.imwrite('debug/model/img.png', batched_inputs[0]['image'].numpy())
+
         images = [x["image"].to(self.device) for x in batched_inputs]
         images = [(x - self.pixel_mean) / self.pixel_std for x in images]
         images = ImageList.from_tensors(images, self.size_divisibility)
@@ -313,14 +316,15 @@ class MaskFormer(nn.Module):
                     }
                 )
             else:
-                gt_boxes = targets_per_image.gt_boxes.tensor()  # (N, 4)
+                gt_boxes = targets_per_image.gt_boxes.tensor  # (N, 4)
                 box_masks_full_per_image = torch.zeros(
                     (gt_boxes.shape[0], h_pad, w_pad), dtype=gt_boxes.dtype, device=gt_boxes.device
                 )
 
                 for ins_i, gt_box in enumerate(gt_boxes.split(1)):
+                    gt_box = gt_box.squeeze()
                     box_masks_full_per_image[
-                        ins_i, int(gt_box[1]):int(gt_box[3] + 1), int(gt_box[0]):int(gt_box[2] + 1)
+                        ins_i, int(gt_box[1]):int(gt_box[3]) + 1, int(gt_box[0]):int(gt_box[2]) + 1
                     ] = 1.0
 
                 box_masks_per_image = box_masks_full_per_image[:, start::stride, start::stride]
@@ -334,9 +338,9 @@ class MaskFormer(nn.Module):
                 assert len(gt_boxes) == gt_masks.shape[0]
                 for ins_idx in range(len(gt_boxes)):
                     org_mask = gt_masks[ins_idx].cpu().numpy()
-                    cv2.imwirte('debug/model/gt_ins_{}_org_mask.png'.format(ins_idx), org_mask)
+                    # cv2.imwrite('debug/model/gt_ins_{}_org_mask.png'.format(ins_idx), org_mask * 255)
                     box_mask = box_masks_full_per_image.cpu().numpy()
-                    cv2.imwirte('debug/model/gt_ins_{}_box_mask.png'.format(ins_idx), box_mask)
+                    # cv2.imwrite('debug/model/gt_ins_{}_box_mask.png'.format(ins_idx), box_mask * 255)
 
                 new_targets.append(
                     {
