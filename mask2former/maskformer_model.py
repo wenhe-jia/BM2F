@@ -16,8 +16,8 @@ from detectron2.modeling.postprocessing import sem_seg_postprocess
 from detectron2.structures import Boxes, ImageList, Instances, BitMasks
 from detectron2.utils.memory import retry_if_cuda_oom
 
-from .modeling.criterion import SetCriterion
-from .modeling.matcher import HungarianMatcher
+from .modeling.criterion import SetCriterionWeakSup, SetCriterion
+from .modeling.matcher import HungarianMatcherBox, HungarianMatcherMask
 
 
 @META_ARCH_REGISTRY.register()
@@ -131,7 +131,7 @@ class MaskFormer(nn.Module):
             # cost weights for box matcher
             bbox_weight = cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.BBOX_WEIGHT
             giou_weight = cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.GIOU_WEIGHT
-            matcher = VideoHungarianMatcherBox(
+            matcher = HungarianMatcherBox(
                 cost_class=class_weight,
                 cost_bbox=bbox_weight,
                 cost_giou=giou_weight,
@@ -325,19 +325,23 @@ class MaskFormer(nn.Module):
 
                 box_masks_per_image = box_masks_full_per_image[:, start::stride, start::stride]
 
+                rel_gt_boxes = torch.zeros_like(gt_boxes, dtype=torch.float, device=self.device)
+                rel_gt_boxes[:, 0::2] = gt_boxes[:, 0::2] / float(w_pad)
+                rel_gt_boxes[:, 1::2] = gt_boxes[:, 1::2] / float(h_pad)
+
                 # for debug
                 gt_masks = targets_per_image.gt_masks
                 assert len(gt_boxes) == gt_masks.shape[0]
                 for ins_idx in range(len(gt_boxes)):
                     org_mask = gt_masks[ins_idx].cpu().numpy()
-                    cv2.imwirte('debug/ins_{}_org_mask.png'.format(ins_idx), org_mask)
+                    cv2.imwirte('debug/pt_ins_{}_org_mask.png'.format(ins_idx), org_mask)
                     box_mask = box_masks_full_per_image.cpu().numpy()
-                    cv2.imwirte('debug/ins_{}_box_mask.png'.format(ins_idx), box_mask)
+                    cv2.imwirte('debug/pt_ins_{}_box_mask.png'.format(ins_idx), box_mask)
 
                 new_targets.append(
                     {
                         "labels": targets_per_image.gt_classes,
-                        "bboxes": gt_boxes.float(),
+                        "bboxes": rel_gt_boxes.float(),
                         "box_masks_full": box_masks_full_per_image,
                         "box_masks": box_masks_per_image
                     }
