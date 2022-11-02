@@ -1,6 +1,9 @@
 # Copyright (c) Facebook, Inc. and its affiliates.
 from typing import Tuple
 
+import cv2
+import numpy as np
+
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -29,6 +32,7 @@ class MaskFormer(nn.Module):
         *,
         backbone: Backbone,
         sem_seg_head: nn.Module,
+        weak_supervision: bool,
         criterion: nn.Module,
         num_queries: int,
         object_mask_threshold: float,
@@ -93,6 +97,8 @@ class MaskFormer(nn.Module):
         if not self.semantic_on:
             assert self.sem_seg_postprocess_before_inference
 
+        self.weak_supervision = weak_supervision
+
     @classmethod
     def from_config(cls, cfg):
         backbone = build_backbone(cfg)
@@ -102,20 +108,37 @@ class MaskFormer(nn.Module):
         deep_supervision = cfg.MODEL.MASK_FORMER.DEEP_SUPERVISION
         no_object_weight = cfg.MODEL.MASK_FORMER.NO_OBJECT_WEIGHT
 
-        # loss weights
+        # classification loss weights
         class_weight = cfg.MODEL.MASK_FORMER.CLASS_WEIGHT
-        dice_weight = cfg.MODEL.MASK_FORMER.DICE_WEIGHT
-        mask_weight = cfg.MODEL.MASK_FORMER.MASK_WEIGHT
 
-        # building criterion
-        matcher = HungarianMatcher(
-            cost_class=class_weight,
-            cost_mask=mask_weight,
-            cost_dice=dice_weight,
-            num_points=cfg.MODEL.MASK_FORMER.TRAIN_NUM_POINTS,
-        )
+        weak_supervision = cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION
 
-        weight_dict = {"loss_ce": class_weight, "loss_mask": mask_weight, "loss_dice": dice_weight}
+        if not weak_supervision:
+            dice_weight = cfg.MODEL.MASK_FORMER.DICE_WEIGHT
+            mask_weight = cfg.MODEL.MASK_FORMER.MASK_WEIGHT
+
+            # building criterion
+            matcher = HungarianMatcherMask(
+                cost_class=class_weight,
+                cost_mask=mask_weight,
+                cost_dice=dice_weight,
+                num_points=cfg.MODEL.MASK_FORMER.TRAIN_NUM_POINTS,
+            )
+
+            weight_dict = {"loss_ce": class_weight, "loss_mask": mask_weight, "loss_dice": dice_weight}
+            losses = ["labels", "masks"]
+        else:
+            # cost weights for box matcher
+            bbox_weight = cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.BBOX_WEIGHT
+            giou_weight = cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.GIOU_WEIGHT
+            matcher = VideoHungarianMatcherBox(
+                cost_class=class_weight,
+                cost_bbox=bbox_weight,
+                cost_giou=giou_weight,
+            )
+            mask_projection_weight = cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_PROJECTION_WEIGHT
+            weight_dict = {"loss_ce": class_weight, "loss_mask_projection": mask_projection_weight}
+            losses = ["labels", "weaksup_masks"]
 
         if deep_supervision:
             dec_layers = cfg.MODEL.MASK_FORMER.DEC_LAYERS
@@ -124,22 +147,31 @@ class MaskFormer(nn.Module):
                 aux_weight_dict.update({k + f"_{i}": v for k, v in weight_dict.items()})
             weight_dict.update(aux_weight_dict)
 
-        losses = ["labels", "masks"]
+        if not weak_supervision:
+            criterion = SetCriterion(
+                sem_seg_head.num_classes,
+                matcher=matcher,
+                weight_dict=weight_dict,
+                eos_coef=no_object_weight,
+                losses=losses,
+                num_points=cfg.MODEL.MASK_FORMER.TRAIN_NUM_POINTS,
+                oversample_ratio=cfg.MODEL.MASK_FORMER.OVERSAMPLE_RATIO,
+                importance_sample_ratio=cfg.MODEL.MASK_FORMER.IMPORTANCE_SAMPLE_RATIO,
+            )
+        else:
+            criterion = VideoSetCriterionWeakSup(
+                sem_seg_head.num_classes,
+                matcher=matcher,
+                weight_dict=weight_dict,
+                eos_coef=no_object_weight,
+                losses=losses,
+            )
 
-        criterion = SetCriterion(
-            sem_seg_head.num_classes,
-            matcher=matcher,
-            weight_dict=weight_dict,
-            eos_coef=no_object_weight,
-            losses=losses,
-            num_points=cfg.MODEL.MASK_FORMER.TRAIN_NUM_POINTS,
-            oversample_ratio=cfg.MODEL.MASK_FORMER.OVERSAMPLE_RATIO,
-            importance_sample_ratio=cfg.MODEL.MASK_FORMER.IMPORTANCE_SAMPLE_RATIO,
-        )
 
         return {
             "backbone": backbone,
             "sem_seg_head": sem_seg_head,
+            "weak_supervision": weak_supervision,
             "criterion": criterion,
             "num_queries": cfg.MODEL.MASK_FORMER.NUM_OBJECT_QUERIES,
             "object_mask_threshold": cfg.MODEL.MASK_FORMER.TEST.OBJECT_MASK_THRESHOLD,
@@ -263,18 +295,54 @@ class MaskFormer(nn.Module):
 
     def prepare_targets(self, targets, images):
         h_pad, w_pad = images.tensor.shape[-2:]
+        start, stride = 2, 4  # TODO: adapt 'start' and 'stride' into config
         new_targets = []
         for targets_per_image in targets:
-            # pad gt
-            gt_masks = targets_per_image.gt_masks
-            padded_masks = torch.zeros((gt_masks.shape[0], h_pad, w_pad), dtype=gt_masks.dtype, device=gt_masks.device)
-            padded_masks[:, : gt_masks.shape[1], : gt_masks.shape[2]] = gt_masks
-            new_targets.append(
-                {
-                    "labels": targets_per_image.gt_classes,
-                    "masks": padded_masks,
-                }
-            )
+            if not self.weak_supervision:
+                # pad gt
+                gt_masks = targets_per_image.gt_masks
+                padded_masks = torch.zeros(
+                    (gt_masks.shape[0], h_pad, w_pad), dtype=gt_masks.dtype, device=gt_masks.device
+                )
+                padded_masks[:, : gt_masks.shape[1], : gt_masks.shape[2]] = gt_masks
+
+                new_targets.append(
+                    {
+                        "labels": targets_per_image.gt_classes,
+                        "masks": padded_masks,
+                    }
+                )
+            else:
+                gt_boxes = targets_per_image.gt_boxes.tensor()  # (N, 4)
+                box_masks_full_per_image = torch.zeros(
+                    (gt_boxes.shape[0], h_pad, w_pad), dtype=gt_boxes.dtype, device=gt_boxes.device
+                )
+
+                for ins_i, gt_box in enumerate(gt_boxes.split(1)):
+                    box_masks_full_per_image[
+                        ins_i, int(gt_box[1]):int(gt_box[3] + 1), int(gt_box[0]):int(gt_box[2] + 1)
+                    ] = 1.0
+
+                box_masks_per_image = box_masks_full_per_image[:, start::stride, start::stride]
+
+                # for debug
+                gt_masks = targets_per_image.gt_masks
+                assert len(gt_boxes) == gt_masks.shape[0]
+                for ins_idx in range(len(gt_boxes)):
+                    org_mask = gt_masks[ins_idx].cpu().numpy()
+                    cv2.imwirte('debug/ins_{}_org_mask.png'.format(ins_idx), org_mask)
+                    box_mask = box_masks_full_per_image.cpu().numpy()
+                    cv2.imwirte('debug/ins_{}_box_mask.png'.format(ins_idx), box_mask)
+
+                new_targets.append(
+                    {
+                        "labels": targets_per_image.gt_classes,
+                        "bboxes": gt_boxes.float(),
+                        "box_masks_full": box_masks_full_per_image,
+                        "box_masks": box_masks_per_image
+                    }
+                )
+
         return new_targets
 
     def semantic_inference(self, mask_cls, mask_pred):
