@@ -179,7 +179,7 @@ class VideoHungarianMatcherBox(nn.Module):
                     rel_out_boxes[out_i, frame_i, :] = rel_out_box
 
             # Compute bounding box L2 cost.
-            cost_bbox = torch.cdist(rel_out_boxes.flatten(1, 2), tgt_bboxes.flatten(1, 2))  # (num_queriy, num_gt)
+            cost_bbox = torch.cdist(rel_out_boxes.flatten(1, 2), tgt_bboxes.flatten(1, 2))  # (num_query, num_gt)
 
             # Compute bounding box GIoU cost.
             cost_giou = 0

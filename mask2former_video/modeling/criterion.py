@@ -189,8 +189,8 @@ class VideoSetCriterionWeakSup(nn.Module):
         target_masks = target_box_masks.flatten(0, 1)[:, None]
 
         # project mask to x & y axis
-        # masks_x: (num_ins, H_pad/4)
-        # masks_y: (num_ins, W_pad/4)
+        # masks_x: (num_ins*T, H_pad/4)
+        # masks_y: (num_ins*T, W_pad/4)
         src_masks_x = src_masks.max(dim=3, keepdim=True)[0].flatten(1, 3)
         src_masks_y = src_masks.max(dim=2, keepdim=True)[0].flatten(1, 3)
 
