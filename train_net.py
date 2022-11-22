@@ -56,6 +56,7 @@ from mask2former import (
     MaskFormerSemanticDatasetMapper,
     SemanticSegmentorWithTTA,
     add_maskformer2_config,
+    WandBWriter
 )
 
 
@@ -276,6 +277,12 @@ class Trainer(DefaultTrainer):
         res = cls.test(cfg, model, evaluators)
         res = OrderedDict({k + "_TTA": v for k, v in res.items()})
         return res
+
+    def build_writers(self):
+        default_writers = super(Trainer, self).build_writers()
+        if self.cfg.WANDB.ENABLED:
+            default_writers.append(WandBWriter(self.cfg))
+        return default_writers
 
 
 def setup(args):

@@ -24,3 +24,6 @@ from .test_time_augmentation import SemanticSegmentorWithTTA
 
 # evaluation
 from .evaluation.instance_evaluation import InstanceSegEvaluator
+
+# utils
+from .utils.wandb_writer import WandBWriter

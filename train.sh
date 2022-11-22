@@ -1,4 +1,7 @@
-CUDA_VISIBLE_DEVICES=0,1 \
-  python train_net_video.py \
-  --config-file configs/youtubevis_2021/video_maskformer2_R50_bs4_8ep.yaml \
-  --num-gpus 2
+python train_net.py \
+  --dist-url tcp://127.0.0.1:$(( RANDOM % 1000 + 20100 )) \
+  --num-gpus 4 \
+  --config-file configs/coco_wo_lsj/maskformer2_R50_bs16_12ep_projection.yaml \
+  --resume \
+  OUTPUT_DIR coco-ins-projection-withsigmoid-weightup \
+  WANDB.ENABLED True WANDB.ENTITY garvinxxx WANDB.NAME coco_projection-withsigmoid-weightup \

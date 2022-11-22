@@ -175,6 +175,9 @@ class MaskFormerInstanceDatasetMapper:
             masks = BitMasks(torch.stack(masks))
             instances.gt_masks = masks.tensor
 
+        # for weak supervision
+        instances.gt_boxes = BitMasks(instances.gt_masks).get_bounding_boxes()
+
         dataset_dict["instances"] = instances
 
         return dataset_dict

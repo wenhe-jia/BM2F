@@ -15,9 +15,13 @@ from detectron2.modeling.backbone import Backbone
 from detectron2.modeling.postprocessing import sem_seg_postprocess
 from detectron2.structures import Boxes, ImageList, Instances, BitMasks
 from detectron2.utils.memory import retry_if_cuda_oom
+from detectron2.structures.masks import BitMasks
 
-from .modeling.criterion import SetCriterionWeakSup, SetCriterion
-from .modeling.matcher import HungarianMatcherBox, HungarianMatcherMask
+from .modeling.criterion import SetCriterionProjection, SetCriterion, SetCriterionWeakSup
+from .modeling.matcher import HungarianMatcherBox, HungarianMatcherMask, HungarianMatcherProjMask
+from .utils.weaksup_utils import unfold_wo_center, get_images_color_similarity
+
+from skimage import color
 
 
 @META_ARCH_REGISTRY.register()
@@ -47,6 +51,8 @@ class MaskFormer(nn.Module):
         panoptic_on: bool,
         instance_on: bool,
         test_topk_per_image: int,
+        pairwise_size: int,
+        pairwise_dilation: int
     ):
         """
         Args:
@@ -98,6 +104,11 @@ class MaskFormer(nn.Module):
             assert self.sem_seg_postprocess_before_inference
 
         self.weak_supervision = weak_supervision
+        # TODO: set follows configurable
+        self.bottom_pixels_removed = 10
+        self.pairwise_size = pairwise_size
+        self.pairwise_dilation = pairwise_dilation
+        self.mask_out_stride = 4
 
     @classmethod
     def from_config(cls, cfg):
@@ -108,38 +119,62 @@ class MaskFormer(nn.Module):
         deep_supervision = cfg.MODEL.MASK_FORMER.DEEP_SUPERVISION
         no_object_weight = cfg.MODEL.MASK_FORMER.NO_OBJECT_WEIGHT
 
-        # classification loss weights
-        class_weight = cfg.MODEL.MASK_FORMER.CLASS_WEIGHT
+        # define supervision type
+        weak_supervision = cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.ENABLED
+        matcher_target_type = cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MATCHER_TYPE
+        mask_target_type = cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_TARGET_TYPE
 
-        weak_supervision = cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION
-
-        if not weak_supervision:
-            dice_weight = cfg.MODEL.MASK_FORMER.DICE_WEIGHT
-            mask_weight = cfg.MODEL.MASK_FORMER.MASK_WEIGHT
-
-            # building criterion
-            matcher = HungarianMatcherMask(
-                cost_class=class_weight,
-                cost_mask=mask_weight,
-                cost_dice=dice_weight,
-                num_points=cfg.MODEL.MASK_FORMER.TRAIN_NUM_POINTS,
-            )
-
-            weight_dict = {"loss_ce": class_weight, "loss_mask": mask_weight, "loss_dice": dice_weight}
-            losses = ["labels", "masks"]
+        if weak_supervision:
+            if mask_target_type == "box_mask":
+                weight_dict = {
+                    "loss_ce": cfg.MODEL.MASK_FORMER.CLASS_WEIGHT,
+                    "loss_mask": cfg.MODEL.MASK_FORMER.MASK_WEIGHT,
+                    "loss_dice": cfg.MODEL.MASK_FORMER.DICE_WEIGHT
+                }
+            elif mask_target_type == "projection_mask":
+                weight_dict = {
+                    "loss_ce": cfg.MODEL.MASK_FORMER.CLASS_WEIGHT,
+                    "loss_mask_projection": cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_PROJECTION_WEIGHT
+                }
+            elif mask_target_type == "projection_and_pairwise":
+                weight_dict = {
+                    "loss_ce": cfg.MODEL.MASK_FORMER.CLASS_WEIGHT,
+                    "loss_mask_projection": cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_PROJECTION_WEIGHT,
+                    "loss_pairwise": cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE_WEIGHT
+                }
+            else:
+                raise Exception("Unknown mask_target_type type !!!")
         else:
-            # cost weights for box matcher
-            bbox_weight = cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.BBOX_WEIGHT
-            giou_weight = cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.GIOU_WEIGHT
-            matcher = HungarianMatcherBox(
-                cost_class=class_weight,
-                cost_bbox=bbox_weight,
-                cost_giou=giou_weight,
-            )
-            mask_projection_weight = cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_PROJECTION_WEIGHT
-            weight_dict = {"loss_ce": class_weight, "loss_mask_projection": mask_projection_weight}
-            losses = ["labels", "weaksup_masks"]
+            weight_dict = {
+                "loss_ce": cfg.MODEL.MASK_FORMER.CLASS_WEIGHT,
+                "loss_mask": cfg.MODEL.MASK_FORMER.MASK_WEIGHT,
+                "loss_dice": cfg.MODEL.MASK_FORMER.DICE_WEIGHT
+            }
 
+        # build matcher
+        if matcher_target_type == "mask" or matcher_target_type == "box_mask":
+            matcher = HungarianMatcherMask(
+                cost_class=cfg.MODEL.MASK_FORMER.CLASS_WEIGHT,
+                cost_mask=cfg.MODEL.MASK_FORMER.MASK_WEIGHT,
+                cost_dice=cfg.MODEL.MASK_FORMER.DICE_WEIGHT,
+                num_points=cfg.MODEL.MASK_FORMER.TRAIN_NUM_POINTS,
+                target_type=matcher_target_type
+            )
+        elif matcher_target_type == "box":
+            matcher = HungarianMatcherBox(
+                cost_class=cfg.MODEL.MASK_FORMER.CLASS_WEIGHT,
+                cost_bbox=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.BBOX_WEIGHT,
+                cost_giou=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.GIOU_WEIGHT,
+            )
+        elif matcher_target_type == "projection_mask":
+            matcher = HungarianMatcherProjMask(
+                cost_class=cfg.MODEL.MASK_FORMER.CLASS_WEIGHT,
+                cost_projection=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_PROJECTION_WEIGHT,
+            )
+        else:
+            raise Exception("Unknown Matcher type !!!")
+
+        # set loss weight dict
         if deep_supervision:
             dec_layers = cfg.MODEL.MASK_FORMER.DEC_LAYERS
             aux_weight_dict = {}
@@ -147,7 +182,9 @@ class MaskFormer(nn.Module):
                 aux_weight_dict.update({k + f"_{i}": v for k, v in weight_dict.items()})
             weight_dict.update(aux_weight_dict)
 
+        # build criterion
         if not weak_supervision:
+            losses = ["labels", "masks"]
             criterion = SetCriterion(
                 sem_seg_head.num_classes,
                 matcher=matcher,
@@ -157,15 +194,46 @@ class MaskFormer(nn.Module):
                 num_points=cfg.MODEL.MASK_FORMER.TRAIN_NUM_POINTS,
                 oversample_ratio=cfg.MODEL.MASK_FORMER.OVERSAMPLE_RATIO,
                 importance_sample_ratio=cfg.MODEL.MASK_FORMER.IMPORTANCE_SAMPLE_RATIO,
+                mask_target_type="mask",
             )
         else:
-            criterion = SetCriterionWeakSup(
-                sem_seg_head.num_classes,
-                matcher=matcher,
-                weight_dict=weight_dict,
-                eos_coef=no_object_weight,
-                losses=losses,
-            )
+            if mask_target_type == "box_mask":
+                losses = ["labels", "masks"]
+                criterion = SetCriterion(
+                    sem_seg_head.num_classes,
+                    matcher=matcher,
+                    weight_dict=weight_dict,
+                    eos_coef=no_object_weight,
+                    losses=losses,
+                    num_points=cfg.MODEL.MASK_FORMER.TRAIN_NUM_POINTS,
+                    oversample_ratio=cfg.MODEL.MASK_FORMER.OVERSAMPLE_RATIO,
+                    importance_sample_ratio=cfg.MODEL.MASK_FORMER.IMPORTANCE_SAMPLE_RATIO,
+                    mask_target_type="box_mask",
+                )
+            elif mask_target_type == "projection_mask":
+                losses = ["labels", "projection_masks"]
+                criterion = SetCriterionProjection(
+                    sem_seg_head.num_classes,
+                    matcher=matcher,
+                    weight_dict=weight_dict,
+                    eos_coef=no_object_weight,
+                    losses=losses,
+                )
+            elif mask_target_type == "projection_and_pairwise":
+                losses = ["labels", "projection_masks", "pairwise"]
+
+                criterion = SetCriterionWeakSup(
+                    sem_seg_head.num_classes,
+                    matcher=matcher,
+                    weight_dict=weight_dict,
+                    eos_coef=no_object_weight,
+                    pairwise_size=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.SIZE,
+                    pairwise_dilation=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.DILATION,
+                    pairwise_color_thresh=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.COLOR_THRESH,
+                    losses=losses,
+                )
+            else:
+                raise Exception("Unknown mask_target_type type !!!")
 
 
         return {
@@ -190,6 +258,8 @@ class MaskFormer(nn.Module):
             "instance_on": cfg.MODEL.MASK_FORMER.TEST.INSTANCE_ON,
             "panoptic_on": cfg.MODEL.MASK_FORMER.TEST.PANOPTIC_ON,
             "test_topk_per_image": cfg.TEST.DETECTIONS_PER_IMAGE,
+            "pairwise_size": cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.SIZE,
+            "pairwise_dilation": cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.DILATION
         }
 
     @property
@@ -222,12 +292,10 @@ class MaskFormer(nn.Module):
                     segments_info (list[dict]): Describe each segment in `panoptic_seg`.
                         Each dict contains keys "id", "category_id", "isthing".
         """
-        print(batched_inputs[0]['image'])
-        # cv2.imwrite('debug/model/img.png', batched_inputs[0]['image'].numpy())
-
-        images = [x["image"].to(self.device) for x in batched_inputs]
-        images = [(x - self.pixel_mean) / self.pixel_std for x in images]
+        original_images = [x["image"].to(self.device) for x in batched_inputs]
+        images = [(x - self.pixel_mean) / self.pixel_std for x in original_images]
         images = ImageList.from_tensors(images, self.size_divisibility)
+        # cv2.imwrite('debug/model/img.png', batched_inputs[0]['image'].numpy().transpose(1, 2, 0))
 
         features = self.backbone(images.tensor)
         outputs = self.sem_seg_head(features)
@@ -236,7 +304,11 @@ class MaskFormer(nn.Module):
             # mask classification target
             if "instances" in batched_inputs[0]:
                 gt_instances = [x["instances"].to(self.device) for x in batched_inputs]
-                targets = self.prepare_targets(gt_instances, images)
+                if self.weak_supervision:
+                    image_heights = [x["height"] for x in batched_inputs]
+                    targets = self.prepare_weaksup_targets(gt_instances, original_images, image_heights)
+                else:
+                    targets = self.prepare_targets(gt_instances, images)
             else:
                 targets = None
 
@@ -298,58 +370,96 @@ class MaskFormer(nn.Module):
 
     def prepare_targets(self, targets, images):
         h_pad, w_pad = images.tensor.shape[-2:]
-        start, stride = 2, 4  # TODO: adapt 'start' and 'stride' into config
         new_targets = []
         for targets_per_image in targets:
-            if not self.weak_supervision:
-                # pad gt
-                gt_masks = targets_per_image.gt_masks
-                padded_masks = torch.zeros(
-                    (gt_masks.shape[0], h_pad, w_pad), dtype=gt_masks.dtype, device=gt_masks.device
-                )
-                padded_masks[:, : gt_masks.shape[1], : gt_masks.shape[2]] = gt_masks
+            # pad gt
+            gt_masks = targets_per_image.gt_masks
+            padded_masks = torch.zeros(
+                (gt_masks.shape[0], h_pad, w_pad), dtype=gt_masks.dtype, device=gt_masks.device
+            )
+            padded_masks[:, : gt_masks.shape[1], : gt_masks.shape[2]] = gt_masks
 
-                new_targets.append(
-                    {
-                        "labels": targets_per_image.gt_classes,
-                        "masks": padded_masks,
-                    }
-                )
-            else:
-                gt_boxes = targets_per_image.gt_boxes.tensor  # (N, 4)
-                box_masks_full_per_image = torch.zeros(
-                    (gt_boxes.shape[0], h_pad, w_pad), dtype=gt_boxes.dtype, device=gt_boxes.device
-                )
+            new_targets.append(
+                {
+                    "labels": targets_per_image.gt_classes,
+                    "masks": padded_masks,
+                }
+            )
 
+        return new_targets
+
+    def prepare_weaksup_targets(self, targets, org_images, img_heights):
+        # masks of org image shape
+        org_image_masks = [torch.ones_like(x[0], dtype=torch.float32) for x in org_images]
+        # mask out the bottom area where the COCO dataset probably has wrong annotations
+        for i in range(len(org_image_masks)):
+            im_h = img_heights[i]
+            pixels_removed = int(
+                self.bottom_pixels_removed *
+                float(org_images[i].size(1)) / float(im_h)
+            )
+            if pixels_removed > 0:
+                org_image_masks[i][-pixels_removed:, :] = 0
+
+        # calculate color similarity, pad org images which is not normalized by pix mean and std
+        original_images = ImageList.from_tensors(org_images, self.size_divisibility).tensor
+        original_image_masks = ImageList.from_tensors(org_image_masks, self.size_divisibility, pad_value=0.0).tensor
+
+        stride = self.mask_out_stride  # 4
+        start = int(stride // 2)
+        assert original_images.size(2) % stride == 0
+        assert original_images.size(3) % stride == 0
+        # down sample org image and masks(of torch.ones)
+        downsampled_images = F.avg_pool2d(
+            original_images.float(), kernel_size=stride,
+            stride=stride, padding=0
+        )[:, [2, 1, 0]]  # (N, C, H, W) --> (N, C, H/4, W/4) --> (N, W/4, H/4, C)
+        downsampled_image_masks = original_image_masks[:, start::stride, start::stride]  # (N, H/4, W/4)
+
+        h_pad, w_pad = original_images.shape[-2:]
+        new_targets = []
+        for im_ind, targets_per_image in enumerate(targets):
+            # images_lab = color.rgb2lab(downsampled_images[im_ind].byte().permute(1, 2, 0).cpu().numpy())  # (H/4, W/4, 3)
+            # images_lab = torch.as_tensor(images_lab, device=downsampled_images.device, dtype=torch.float32)
+            # images_lab = images_lab.permute(2, 0, 1)[None] # (1, 3, H/4, W/4)
+            # images_color_similarity = get_images_color_similarity(
+            #     images_lab, downsampled_image_masks[im_ind],
+            #     self.pairwise_size, self.pairwise_dilation
+            # )  # (1, k*k-1, H/4, W/4)
+
+            gt_boxes = targets_per_image.gt_boxes.tensor  # (N, 4)
+            box_masks_full_per_image = torch.zeros(
+                (gt_boxes.shape[0], h_pad, w_pad),
+                dtype=gt_boxes.dtype,
+                device=gt_boxes.device
+            )
+
+            if gt_boxes.shape[0] > 0:
                 for ins_i, gt_box in enumerate(gt_boxes.split(1)):
                     gt_box = gt_box.squeeze()
                     box_masks_full_per_image[
-                        ins_i, int(gt_box[1]):int(gt_box[3]) + 1, int(gt_box[0]):int(gt_box[2]) + 1
+                        ins_i,
+                        int(gt_box[1]):int(gt_box[3]) + 1,
+                        int(gt_box[0]):int(gt_box[2]) + 1
                     ] = 1.0
 
-                box_masks_per_image = box_masks_full_per_image[:, start::stride, start::stride]
+            box_masks_per_image = box_masks_full_per_image[:, start::stride, start::stride]
 
-                rel_gt_boxes = torch.zeros_like(gt_boxes, dtype=torch.float, device=self.device)
-                rel_gt_boxes[:, 0::2] = gt_boxes[:, 0::2] / float(w_pad)
-                rel_gt_boxes[:, 1::2] = gt_boxes[:, 1::2] / float(h_pad)
+            rel_gt_boxes = torch.zeros_like(gt_boxes, dtype=torch.float, device=self.device)
+            rel_gt_boxes[:, 0::2] = gt_boxes[:, 0::2] / float(w_pad)
+            rel_gt_boxes[:, 1::2] = gt_boxes[:, 1::2] / float(h_pad)
 
-                # for debug
-                gt_masks = targets_per_image.gt_masks
-                assert len(gt_boxes) == gt_masks.shape[0]
-                for ins_idx in range(len(gt_boxes)):
-                    org_mask = gt_masks[ins_idx].cpu().numpy()
-                    # cv2.imwrite('debug/model/gt_ins_{}_org_mask.png'.format(ins_idx), org_mask * 255)
-                    box_mask = box_masks_full_per_image.cpu().numpy()
-                    # cv2.imwrite('debug/model/gt_ins_{}_box_mask.png'.format(ins_idx), box_mask * 255)
-
-                new_targets.append(
-                    {
-                        "labels": targets_per_image.gt_classes,
-                        "bboxes": rel_gt_boxes.float(),
-                        "box_masks_full": box_masks_full_per_image,
-                        "box_masks": box_masks_per_image
-                    }
-                )
+            new_targets.append(
+                {
+                    "labels": targets_per_image.gt_classes,
+                    "bboxes": rel_gt_boxes.float(),
+                    "box_masks_full": box_masks_full_per_image,
+                    "box_masks": box_masks_per_image,
+                    # "images_color_similarity": torch.cat(
+                    #     [images_color_similarity for _ in range(len(targets_per_image))], dim=0
+                    # )  # (image_gt_num, k*k-1, H/4, W/4)
+                }
+            )
 
         return new_targets
 
@@ -431,6 +541,21 @@ class MaskFormer(nn.Module):
         topk_indices = topk_indices // self.sem_seg_head.num_classes
         # mask_pred = mask_pred.unsqueeze(1).repeat(1, self.sem_seg_head.num_classes, 1).flatten(0, 1)
         mask_pred = mask_pred[topk_indices]
+
+        # bbox_pred = BitMasks(mask_pred).get_bounding_boxes().tensor
+        # for ins_idx in range(mask_pred.shape[0]):
+        #     ins_mask = mask_pred[ins_idx, :, :]
+        #     ins_bbox = bbox_pred[ins_idx, :]
+        #
+        #     save_mask = ((ins_mask > 0).int() * 255).cpu().numpy()
+        #     cv2.rectangle(
+        #         save_mask,
+        #         (int(ins_bbox[0].cpu()), int(ins_bbox[1].cpu())),
+        #         (int(ins_bbox[2].cpu()), int(ins_bbox[3].cpu())),
+        #         (0, 0, 255)
+        #     )
+        #     cv2.imwrite('debug/infer-15k/pred_ins_{}.png'.format(ins_idx), save_mask)
+
 
         # if this is panoptic segmentation, we only keep the "thing" classes
         if self.panoptic_on:
