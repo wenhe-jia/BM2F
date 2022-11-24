@@ -18,7 +18,7 @@ from detectron2.utils.memory import retry_if_cuda_oom
 from detectron2.structures.masks import BitMasks
 
 from .modeling.criterion import SetCriterionProjection, SetCriterion, SetCriterionWeakSup
-from .modeling.matcher import HungarianMatcherBox, HungarianMatcherMask, HungarianMatcherProjMask
+from .modeling.matcher import HungarianMatcherMask, HungarianMatcherProjMask, HungarianMatcherWeakSup
 from .utils.weaksup_utils import unfold_wo_center, get_images_color_similarity
 
 from skimage import color
@@ -160,16 +160,19 @@ class MaskFormer(nn.Module):
                 num_points=cfg.MODEL.MASK_FORMER.TRAIN_NUM_POINTS,
                 target_type=matcher_target_type
             )
-        elif matcher_target_type == "box":
-            matcher = HungarianMatcherBox(
-                cost_class=cfg.MODEL.MASK_FORMER.CLASS_WEIGHT,
-                cost_bbox=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.BBOX_WEIGHT,
-                cost_giou=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.GIOU_WEIGHT,
-            )
         elif matcher_target_type == "projection_mask":
             matcher = HungarianMatcherProjMask(
                 cost_class=cfg.MODEL.MASK_FORMER.CLASS_WEIGHT,
                 cost_projection=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_PROJECTION_WEIGHT,
+            )
+        elif mask_target_type == "projection_and_pairwise":
+            matcher = HungarianMatcherWeakSup(
+                cost_class=cfg.MODEL.MASK_FORMER.CLASS_WEIGHT,
+                cost_projection=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_PROJECTION_WEIGHT,
+                cost_pairwise=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE_WEIGHT,
+                pairwise_size=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.SIZE,
+                pairwise_dilation=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.DILATION,
+                pairwise_color_thresh=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.COLOR_THRESH,
             )
         else:
             raise Exception("Unknown Matcher type !!!")
@@ -220,8 +223,7 @@ class MaskFormer(nn.Module):
                     losses=losses,
                 )
             elif mask_target_type == "projection_and_pairwise":
-                losses = ["labels", "projection_masks", "pairwise"]
-
+                losses = ["labels", "projection_and_pairwise"]
                 criterion = SetCriterionWeakSup(
                     sem_seg_head.num_classes,
                     matcher=matcher,
@@ -419,13 +421,13 @@ class MaskFormer(nn.Module):
         h_pad, w_pad = original_images.shape[-2:]
         new_targets = []
         for im_ind, targets_per_image in enumerate(targets):
-            # images_lab = color.rgb2lab(downsampled_images[im_ind].byte().permute(1, 2, 0).cpu().numpy())  # (H/4, W/4, 3)
-            # images_lab = torch.as_tensor(images_lab, device=downsampled_images.device, dtype=torch.float32)
-            # images_lab = images_lab.permute(2, 0, 1)[None] # (1, 3, H/4, W/4)
-            # images_color_similarity = get_images_color_similarity(
-            #     images_lab, downsampled_image_masks[im_ind],
-            #     self.pairwise_size, self.pairwise_dilation
-            # )  # (1, k*k-1, H/4, W/4)
+            images_lab = color.rgb2lab(downsampled_images[im_ind].byte().permute(1, 2, 0).cpu().numpy())  # (H/4, W/4, 3)
+            images_lab = torch.as_tensor(images_lab, device=downsampled_images.device, dtype=torch.float32)
+            images_lab = images_lab.permute(2, 0, 1)[None] # (1, 3, H/4, W/4)
+            images_color_similarity = get_images_color_similarity(
+                images_lab, downsampled_image_masks[im_ind],
+                self.pairwise_size, self.pairwise_dilation
+            )  # (1, k*k-1, H/4, W/4)
 
             gt_boxes = targets_per_image.gt_boxes.tensor  # (N, 4)
             box_masks_full_per_image = torch.zeros(
@@ -455,9 +457,9 @@ class MaskFormer(nn.Module):
                     "bboxes": rel_gt_boxes.float(),
                     "box_masks_full": box_masks_full_per_image,
                     "box_masks": box_masks_per_image,
-                    # "images_color_similarity": torch.cat(
-                    #     [images_color_similarity for _ in range(len(targets_per_image))], dim=0
-                    # )  # (image_gt_num, k*k-1, H/4, W/4)
+                    "images_color_similarity": torch.cat(
+                        [images_color_similarity for _ in range(len(targets_per_image))], dim=0
+                    )  # (image_gt_num, k*k-1, H/4, W/4)
                 }
             )
 

@@ -230,7 +230,7 @@ class SetCriterionWeakSup(nn.Module):
         losses = {"loss_ce": loss_ce}
         return losses
 
-    def loss_projection_masks(self, outputs, targets, indices, num_masks):
+    def loss_projection_and_pairwise(self, outputs, targets, indices, num_masks):
         """
             Compute the losses related to the masks: the 1D projection loss.
             targets dicts must contain the key "masks" containing a tensor of dim [nb_target_boxes, h, w]
@@ -247,6 +247,11 @@ class SetCriterionWeakSup(nn.Module):
         target_box_masks = target_box_masks.to(src_masks)
         target_box_masks = target_box_masks[tgt_idx]
 
+        similarities = [t['images_color_similarity'] for t in targets]  # [(N, k*k-1, H, W)] * n
+        target_similarities, valid = nested_tensor_from_tensor_list(similarities).decompose()
+        target_similarities = target_similarities.to(src_masks)
+        target_similarities = target_similarities[tgt_idx]  # (N, k*k-1, H/4, W/4)
+
         # No need to upsample predictions as we are using normalized coordinates :)
         # N x 1 x H/4 x W/4
         src_masks = src_masks[:, None]
@@ -258,62 +263,15 @@ class SetCriterionWeakSup(nn.Module):
         src_masks_x = src_masks.max(dim=3, keepdim=True)[0].flatten(1, 3)
         src_masks_y = src_masks.max(dim=2, keepdim=True)[0].flatten(1, 3)
 
-        with torch.no_grad():
-            target_box_masks_x = target_box_masks.max(dim=3, keepdim=True)[0].flatten(1, 3)
-            target_box_masks_y = target_box_masks.max(dim=2, keepdim=True)[0].flatten(1, 3)
-
-        losses = {
-            "loss_mask_projection": projection_dice_loss_jit(
-                src_masks_x, target_box_masks_x, target_box_masks_y, target_masks_y, num_masks
-            )
-        }
-
-        del src_masks
-        del target_box_masks
-        return losses
-
-    def loss_pairwise(self, outputs, targets, indices, num_masks):
-        """
-            Compute the losses related to the masks: the pairwise loss.
-            targets dicts must contain the key "masks" containing a tensor of dim [nb_target_boxes, h, w]
-        """
-        assert "pred_masks" in outputs
-
-        src_idx = self._get_src_permutation_idx(indices)
-        tgt_idx = self._get_tgt_permutation_idx(indices)
-        src_masks = outputs["pred_masks"]
-        src_masks = src_masks[src_idx]
-        box_masks = [t["box_masks"] for t in targets]
-        # TODO use valid to mask invalid areas due to padding in loss
-        target_box_masks, valid = nested_tensor_from_tensor_list(box_masks).decompose()
-        target_box_masks = target_box_masks.to(src_masks)
-        target_box_masks = target_box_masks[tgt_idx]
-
-        similarities = [t['images_color_similarity'] for t in targets]
-        target_similarities, valid = nested_tensor_from_tensor_list(similarities).decompose()
-        target_similarities = target_similarities.to(src_masks)
-        target_similarities = target_similarities[tgt_idx]  # (N, k*k-1, H/4, W/4)
-
-        # No need to upsample predictions as we are using normalized coordinates :)
-        # N x 1 x H/4 x W/4
-        src_masks = src_masks[:, None]
-        target_box_masks = target_box_masks[:, None]
-
-        with torch.no_grad():
-            _target_similarities = (target_similarities >= self.pairwise_color_thresh).float() * \
-                                   target_box_masks.float()
-
         # Prepare data for pairwise loss
         log_fg_prob = F.logsigmoid(src_masks)
-        log_fg_prob = F.logsigmoid(-src_masks)
+        log_bg_prob = F.logsigmoid(-src_masks)
         # 此处取出的值是每个点周围k*k个点的概率（前/背景）
         log_fg_prob_unfold = unfold_wo_center(
-            log_fg_prob, kernel_size=self.pairwise_size,
-            dilation=self.pairwise_dilation
+            log_fg_prob, kernel_size=self.pairwise_size, dilation=self.pairwise_dilation
         )  # (N, 1, k*k-1, H/4, W/4)
         log_bg_prob_unfold = unfold_wo_center(
-            log_bg_prob, kernel_size=self.pairwise_size,
-            dilation=self.pairwise_dilation
+            log_bg_prob, kernel_size=self.pairwise_size, dilation=self.pairwise_dilation
         )  # (N, 1, k*k-1, H/4, W/4)
 
         # the probability of making the same prediction = p_i * p_j + (1 - p_i) * (1 - p_j)
@@ -329,7 +287,16 @@ class SetCriterionWeakSup(nn.Module):
 
         src_similarities = -log_same_prob[:, 0]  # (N, k*k-1, H/4, W/4)
 
+        with torch.no_grad():
+            target_box_masks_x = target_box_masks.max(dim=3, keepdim=True)[0].flatten(1, 3)
+            target_box_masks_y = target_box_masks.max(dim=2, keepdim=True)[0].flatten(1, 3)
+            _target_similarities = (target_similarities >= self.pairwise_color_thresh).float() * \
+                                   target_box_masks.float()
+
         losses = {
+            "loss_mask_projection": projection_dice_loss_jit(
+                src_masks_x, target_box_masks_x, src_masks_y, target_box_masks_y, num_masks
+            ),
             "loss_pairwise": pairwise_loss_jit(src_similarities, _target_similarities, num_masks)
         }
 
@@ -353,8 +320,7 @@ class SetCriterionWeakSup(nn.Module):
     def get_loss(self, loss, outputs, targets, indices, num_masks):
         loss_map = {
             'labels': self.loss_labels,
-            'projection_masks': self.loss_projection_masks,
-            'pairwise': self.loss_pairwise,
+            'projection_and_pairwise': self.loss_projection_and_pairwise,
         }
         assert loss in loss_map, f"do you really want to compute {loss} loss?"
         return loss_map[loss](outputs, targets, indices, num_masks)
@@ -465,11 +431,14 @@ class SetCriterionProjection(nn.Module):
         tgt_idx = self._get_tgt_permutation_idx(indices)
         src_masks = outputs["pred_masks"]
         src_masks = src_masks[src_idx]
+
+        # masks: [(num_gt_2, H, W), (num_gt_1, H, W), ...]
         masks = [t["box_masks"] for t in targets]
         # TODO use valid to mask invalid areas due to padding in loss
+        # target_masks: (B, max_num_gt, H, W)
         target_masks, valid = nested_tensor_from_tensor_list(masks).decompose()
         target_masks = target_masks.to(src_masks)
-        target_masks = target_masks[tgt_idx]
+        target_masks = target_masks[tgt_idx]  # (num_gt-1+num_gt_2+..., H, W)
 
         # No need to upsample predictions as we are using normalized coordinates :)
         # N x 1 x H/4 x W/4
@@ -644,25 +613,6 @@ class SetCriterion(nn.Module):
         # N x 1 x H x W
         src_masks = src_masks[:, None]
         target_masks = target_masks[:, None]
-        # assert src_masks.shape[0] == target_masks.shape[0]
-        # for ins_ind in range(target_masks.shape[0]):
-        #     ins_mask = src_masks[ins_ind, 0, :, :]
-        #     x_inds = torch.arange(ins_mask.shape[1])
-        #     y_inds = torch.arange(ins_mask.shape[0])
-        #     max_y_sccores, max_y_inds = ins_mask.max(dim=0)
-        #     max_x_sccores, max_x_inds = ins_mask.max(dim=1)
-        #     assert x_inds.shape[0] == max_y_inds.shape[0]
-        #     assert y_inds.shape[0] == max_x_inds.shape[0]
-        #
-        #     ins_mask_png = (src_masks[ins_ind, 0, :, :] > 0).int().cpu() * 180
-        #     _ins_mask_png = torch.stack([ins_mask_png, ins_mask_png, ins_mask_png]).permute(1,2,0).numpy().copy()
-        #     # ys_max use (200, 50, 0), xs_max use (50, 200, 0)
-        #     for x_idx in range(x_inds.shape[0]):
-        #         cv2.circle(_ins_mask_png, (int(x_inds[x_idx]), int(max_y_inds[x_idx])), 2, (255, 0, 0), thickness=1)
-        #     for y_idx in range(y_inds.shape[0]):
-        #         cv2.circle(_ins_mask_png, (int(max_x_inds[y_idx]), int(y_inds[y_idx])), 2, (0, 255, 0), thickness=1)
-        #     cv2.imwrite('/home/user/Program/weakly-spvsd-vis/check-m2f/pred/ins_{}_pred.png'.format(ins_ind), _ins_mask_png)
-        #     cv2.imwrite('/home/user/Program/weakly-spvsd-vis/check-m2f/gt/ins_{}_gt.png'.format(ins_ind), target_masks[ins_ind, 0, :, :].int().cpu().numpy().copy() * 180)
 
         with torch.no_grad():
             # sample point_coords

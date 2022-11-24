@@ -1,0 +1,14 @@
+_BASE_: maskformer2_R50_bs16_12ep.yaml
+MODEL:
+  MASK_FORMER:
+    WEAK_SUPERVISION:
+      ENABLED: True
+      MATCHER_TYPE: "projection_and_pairwise"
+      MASK_TARGET_TYPE: "projection_and_pairwise"
+SOLVER:
+  IMS_PER_BATCH: 8  # 16
+  BASE_LR: 0.00005  # 0.0001
+  STEPS: (120000, 160000)  # (60000, 80000)
+  MAX_ITER: 180000  # 90000
+TEST:
+  EVAL_PERIOD: 20000
