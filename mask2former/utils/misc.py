@@ -73,7 +73,7 @@ def nested_tensor_from_tensor_list(tensor_list: List[Tensor]):
         b, n, e, h, w = batch_shape
         dtype = tensor_list[0].dtype
         device = tensor_list[0].device
-        tensor = torch.zeros(batch_shape, dtype=dtype, device=device)  # (B, C, H, W)
+        tensor = torch.zeros(batch_shape, dtype=dtype, device=device)  # (B, N, E, H, W)
         mask = torch.ones((b, h, w), dtype=torch.bool, device=device)  # (B, H, W)
         for img, pad_img, m in zip(tensor_list, tensor, mask):
             pad_img[: img.shape[0], :, : img.shape[2], : img.shape[3]].copy_(img)

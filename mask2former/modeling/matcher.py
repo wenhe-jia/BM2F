@@ -466,13 +466,13 @@ class HungarianMatcherMask(nn.Module):
                 tgt_mask,
                 point_coords.repeat(tgt_mask.shape[0], 1, 1),
                 align_corners=False,
-            ).squeeze(1)  # (num_gt, num_points)
+            ).squeeze(1)  # (num_gt, 1, num_points) -> (num_gt, num_points)
 
             out_mask = point_sample(
                 out_mask,
                 point_coords.repeat(out_mask.shape[0], 1, 1),
                 align_corners=False,
-            ).squeeze(1)  # (num_query, num_points)
+            ).squeeze(1)  # (num_query, 1, num_points) -> (num_query, num_points)
 
             with autocast(enabled=False):
                 out_mask = out_mask.float()

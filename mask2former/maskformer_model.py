@@ -418,12 +418,12 @@ class MaskFormer(nn.Module):
         )[:, [2, 1, 0]]  # (N, C, H, W) --> (N, C, H/4, W/4) --> (N, W/4, H/4, C)
         downsampled_image_masks = original_image_masks[:, start::stride, start::stride]  # (N, H/4, W/4)
 
-        h_pad, w_pad = original_images.shape[-2:]
+        h_pad, w_pad = original_images.shape[-2:]  ###
         new_targets = []
         for im_ind, targets_per_image in enumerate(targets):
-            images_lab = color.rgb2lab(downsampled_images[im_ind].byte().permute(1, 2, 0).cpu().numpy())  # (H/4, W/4, 3)
+            images_lab = color.rgb2lab(downsampled_images[im_ind].byte().permute(1, 2, 0).cpu().numpy()[:, :, ::-1])  # (H/4, W/4, 3)
             images_lab = torch.as_tensor(images_lab, device=downsampled_images.device, dtype=torch.float32)
-            images_lab = images_lab.permute(2, 0, 1)[None] # (1, 3, H/4, W/4)
+            images_lab = images_lab.permute(2, 0, 1)[None]  # (1, 3, H/4, W/4)
             images_color_similarity = get_images_color_similarity(
                 images_lab, downsampled_image_masks[im_ind],
                 self.pairwise_size, self.pairwise_dilation

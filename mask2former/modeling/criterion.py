@@ -241,6 +241,7 @@ class SetCriterionWeakSup(nn.Module):
         tgt_idx = self._get_tgt_permutation_idx(indices)
         src_masks = outputs["pred_masks"]
         src_masks = src_masks[src_idx]
+        
         box_masks = [t["box_masks"] for t in targets]
         # TODO use valid to mask invalid areas due to padding in loss
         target_box_masks, valid = nested_tensor_from_tensor_list(box_masks).decompose()
