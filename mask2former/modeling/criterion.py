@@ -299,12 +299,12 @@ class SetCriterionWeakSup(nn.Module):
             target_box_masks_x = target_box_masks.max(dim=3, keepdim=True)[0].flatten(1, 3)
             target_box_masks_y = target_box_masks.max(dim=2, keepdim=True)[0].flatten(1, 3)
 
-
+        warmup_factor = min(self._iter.item() / float(self.pairwise_warmup_iters), 1.0)
         losses = {
             "loss_mask_projection": projection_dice_loss_jit(
                 src_masks_x, target_box_masks_x, src_masks_y, target_box_masks_y, num_masks
             ),
-            "loss_pairwise": pairwise_loss_jit(src_similarities, _target_similarities, num_masks)
+            "loss_pairwise": pairwise_loss_jit(src_similarities, _target_similarities, num_masks) * warmup_factor
         }
 
         del src_masks
