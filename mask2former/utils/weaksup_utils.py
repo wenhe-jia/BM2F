@@ -12,18 +12,18 @@ def unfold_wo_center(x, kernel_size, dilation):
         x, kernel_size=kernel_size,
         padding=padding,
         dilation=dilation
-    )  # (1, 3*k*k, h*w )
+    )  # (N, C, H, W) --unfold--> (N, C*k*k, H*W)
 
     unfolded_x = unfolded_x.reshape(
         x.size(0), x.size(1), -1, x.size(2), x.size(3)
-    )  # (1, 3, k*k, h, w)
+    )  # (N, C*k*k, H*W) --> (N, C, k*k, H, W)
 
     # remove the center pixels
     size = kernel_size ** 2
     unfolded_x = torch.cat((
         unfolded_x[:, :, :size // 2],
         unfolded_x[:, :, size // 2 + 1:]
-    ), dim=2)  # (1, 3, k*k-1, h, w)
+    ), dim=2)  # (N, C, k*k-1, H, W)
 
     return unfolded_x
 
@@ -41,9 +41,9 @@ def get_images_color_similarity(images, image_masks, kernel_size, dilation):
     )  # (1, 3, k*k-1, h, w)
 
     diff = images[:, :, None] - unfolded_images
-    # diff: (1, 3, 1, H/4, W/4) - (1, 3, k*k-1, H/4, W/4) -> edges: (1, 3, k*k-1, H/4, W/4)
+    # diff(edge): (1, 3, 1, H/4, W/4) - (1, 3, k*k-1, H/4, W/4) -> edges: (1, 3, k*k-1, H/4, W/4)
     # 一个像素和周边8个像素的在lab空间3通道的减法（差值）
-    similarity = torch.exp(-torch.norm(diff, dim=1) * 0.5)  # (1, k*k-1, H/4, W/4)
+    similarity = torch.exp(-torch.norm(diff, dim=1) * 0.5)  # edge: (1, k*k-1, H/4, W/4)
 
     unfolded_weights = unfold_wo_center(
         image_masks[None, None], kernel_size=kernel_size,

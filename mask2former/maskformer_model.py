@@ -224,6 +224,7 @@ class MaskFormer(nn.Module):
                 )
             elif mask_target_type == "projection_and_pairwise":
                 losses = ["labels", "projection_and_pairwise"]
+                # losses = ["labels", "projection_masks", "color_similarities"]
                 criterion = SetCriterionWeakSup(
                     sem_seg_head.num_classes,
                     matcher=matcher,
@@ -232,6 +233,7 @@ class MaskFormer(nn.Module):
                     pairwise_size=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.SIZE,
                     pairwise_dilation=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.DILATION,
                     pairwise_color_thresh=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.COLOR_THRESH,
+                    pairwise_warmup_iters=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.WARMUP_ITERS,
                     losses=losses,
                 )
             else:
@@ -416,7 +418,7 @@ class MaskFormer(nn.Module):
             original_images.float(), kernel_size=stride,
             stride=stride, padding=0
         )[:, [2, 1, 0]]  # (N, C, H, W) --> (N, C, H/4, W/4) --> (N, W/4, H/4, C)
-        downsampled_image_masks = original_image_masks[:, start::stride, start::stride]  # (N, H/4, W/4)
+        downsampled_image_masks = original_image_masks[:, start::stride, start::stride]  # (N, H/4, W/4), do not use interpolate to ensure org pixel
 
         h_pad, w_pad = original_images.shape[-2:]  ###
         new_targets = []
@@ -428,6 +430,8 @@ class MaskFormer(nn.Module):
                 images_lab, downsampled_image_masks[im_ind],
                 self.pairwise_size, self.pairwise_dilation
             )  # (1, k*k-1, H/4, W/4)
+            # np.save("/home/user/Program/jwh/weakly-spvsd-vis/Weakly-Sup-VIS/debug-ProjPair/similarity-m2f.npy", images_color_similarity.cpu().numpy())
+
 
             gt_boxes = targets_per_image.gt_boxes.tensor  # (N, 4)
             box_masks_full_per_image = torch.zeros(
@@ -447,14 +451,9 @@ class MaskFormer(nn.Module):
 
             box_masks_per_image = box_masks_full_per_image[:, start::stride, start::stride]
 
-            rel_gt_boxes = torch.zeros_like(gt_boxes, dtype=torch.float, device=self.device)
-            rel_gt_boxes[:, 0::2] = gt_boxes[:, 0::2] / float(w_pad)
-            rel_gt_boxes[:, 1::2] = gt_boxes[:, 1::2] / float(h_pad)
-
             new_targets.append(
                 {
                     "labels": targets_per_image.gt_classes,
-                    "bboxes": rel_gt_boxes.float(),
                     "box_masks_full": box_masks_full_per_image,
                     "box_masks": box_masks_per_image,
                     "images_color_similarity": torch.cat(

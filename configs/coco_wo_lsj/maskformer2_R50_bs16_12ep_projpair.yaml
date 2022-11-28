@@ -5,6 +5,8 @@ MODEL:
       ENABLED: True
       MATCHER_TYPE: "projection_and_pairwise"
       MASK_TARGET_TYPE: "projection_and_pairwise"
+      PAIRWISE:
+        WARMUP_ITERS: 40000
 SOLVER:
   IMS_PER_BATCH: 4  # 16
   BASE_LR: 0.000025  # 0.0001
@@ -12,10 +14,5 @@ SOLVER:
   MAX_ITER: 360000  # 90000
 TEST:
   EVAL_PERIOD: 40000
-#SOLVER:
-#  IMS_PER_BATCH: 8  # 16
-#  BASE_LR: 0.00005  # 0.0001
-#  STEPS: (120000, 160000)  # (60000, 80000)
-#  MAX_ITER: 180000  # 90000
-#TEST:
-#  EVAL_PERIOD: 20000
+#DATASETS:
+#  TRAIN: ("coco_train_debug",)
