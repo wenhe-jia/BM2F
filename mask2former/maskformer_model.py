@@ -173,6 +173,7 @@ class MaskFormer(nn.Module):
                 pairwise_size=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.SIZE,
                 pairwise_dilation=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.DILATION,
                 pairwise_color_thresh=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.COLOR_THRESH,
+                pairwise_warmup_iters=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.WARMUP_ITERS,
             )
         else:
             raise Exception("Unknown Matcher type !!!")
@@ -224,7 +225,6 @@ class MaskFormer(nn.Module):
                 )
             elif mask_target_type == "projection_and_pairwise":
                 losses = ["labels", "projection_and_pairwise"]
-                # losses = ["labels", "projection_masks", "color_similarities"]
                 criterion = SetCriterionWeakSup(
                     sem_seg_head.num_classes,
                     matcher=matcher,

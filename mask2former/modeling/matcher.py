@@ -244,6 +244,8 @@ class HungarianMatcherWeakSup(nn.Module):
             pairwise_size: int = 3,
             pairwise_dilation: int = 2,
             pairwise_color_thresh: float = 0.3,
+            pairwise_warmup_iters: int = 10000
+
     ):
         """Creates the matcher
 
@@ -260,8 +262,12 @@ class HungarianMatcherWeakSup(nn.Module):
         self.pairwise_size = pairwise_size
         self.pairwise_dilation = pairwise_dilation
         self.pairwose_color_thresh = pairwise_color_thresh
+        self.pairwise_warmup_iters = pairwise_warmup_iters
 
         assert cost_class != 0 or cost_projection != 0 or cost_pairwise != 0, "all costs cant be 0"
+
+        # for pairwise loss warmup
+        self.register_buffer("_iter", torch.zeros([1]))
 
     @torch.no_grad()
     def memory_efficient_forward(self, outputs, targets):
@@ -288,7 +294,7 @@ class HungarianMatcherWeakSup(nn.Module):
             out_mask = out_mask[:, None]  # (num_query, 1, H_pred, W_pred)
             tgt_box_mask = tgt_box_mask[:, None]  # (num_gt, 1, H_pred, W_pred)
 
-            # images_color_similarities = targets[b]["images_color_similarity"].to(out_mask)  # (num_gt, k*k-1, H/4, W/4)
+            images_color_similarities = targets[b]["images_color_similarity"].to(out_mask)  # (num_gt, k*k-1, H/4, W/4)
 
             # project mask to x & y axis
             # masks_x: (num_ins, 1, H_pad/4, 1)->(num_ins, H_pad/4)
@@ -296,37 +302,38 @@ class HungarianMatcherWeakSup(nn.Module):
             src_mask_x = out_mask.max(dim=3, keepdim=True)[0].flatten(1, 3).float()
             src_mask_y = out_mask.max(dim=2, keepdim=True)[0].flatten(1, 3).float()
 
-            # # Prepare data for pairwise loss
-            # log_fg_prob = F.logsigmoid(out_mask)
-            # log_bg_prob = F.logsigmoid(-out_mask)
-            # # 此处取出的值是每个点周围k*k个点的概率（前/背景）
-            # log_fg_prob_unfold = unfold_wo_center(
-            #     log_fg_prob, kernel_size=self.pairwise_size,
-            #     dilation=self.pairwise_dilation
-            # )  # (N, 1, k*k-1, H/4, W/4)
-            # log_bg_prob_unfold = unfold_wo_center(
-            #     log_bg_prob, kernel_size=self.pairwise_size,
-            #     dilation=self.pairwise_dilation
-            # )  # (N, 1, k*k-1, H/4, W/4)
-            #
-            # # the probability of making the same prediction = p_i * p_j + (1 - p_i) * (1 - p_j)
-            # # we compute the the probability in log space to avoid numerical instability
-            # log_same_fg_prob = log_fg_prob[:, :, None] + log_fg_prob_unfold  # (N, 1, k*k-1, H/4, W/4)
-            # log_same_bg_prob = log_bg_prob[:, :, None] + log_bg_prob_unfold  # (N, 1, k*k-1, H/4, W/4)
-            #
-            # max_ = torch.max(log_same_fg_prob, log_same_bg_prob)
-            # log_same_prob = torch.log(
-            #     torch.exp(log_same_fg_prob - max_) +
-            #     torch.exp(log_same_bg_prob - max_)
-            # ) + max_
-            # src_similarities = -log_same_prob[:, 0]  # (N, k*k-1, H/4, W/4)
+            # Prepare data for pairwise loss
+            log_fg_prob = F.logsigmoid(out_mask)
+            log_bg_prob = F.logsigmoid(-out_mask)
+            # 此处取出的值是每个点周围k*k个点的概率（前/背景）
+            log_fg_prob_unfold = unfold_wo_center(
+                log_fg_prob, kernel_size=self.pairwise_size,
+                dilation=self.pairwise_dilation
+            )  # (N, 1, k*k-1, H/4, W/4)
+            log_bg_prob_unfold = unfold_wo_center(
+                log_bg_prob, kernel_size=self.pairwise_size,
+                dilation=self.pairwise_dilation
+            )  # (N, 1, k*k-1, H/4, W/4)
+
+            # the probability of making the same prediction = p_i * p_j + (1 - p_i) * (1 - p_j)
+            # we compute the the probability in log space to avoid numerical instability
+            log_same_fg_prob = log_fg_prob[:, :, None] + log_fg_prob_unfold  # (N, 1, k*k-1, H/4, W/4)
+            log_same_bg_prob = log_bg_prob[:, :, None] + log_bg_prob_unfold  # (N, 1, k*k-1, H/4, W/4)
+
+            max_ = torch.max(log_same_fg_prob, log_same_bg_prob)
+            log_same_prob = torch.log(
+                torch.exp(log_same_fg_prob - max_) +
+                torch.exp(log_same_bg_prob - max_)
+            ) + max_
+            src_similarities = -log_same_prob[:, 0]  # (N, k*k-1, H/4, W/4)
 
             with torch.no_grad():
                 tgt_mask_x = tgt_box_mask.max(dim=3, keepdim=True)[0].flatten(1, 3).float()
                 tgt_mask_y = tgt_box_mask.max(dim=2, keepdim=True)[0].flatten(1, 3).float()
-                # tgt_similarities = ((images_color_similarities >= self.pairwose_color_thresh).float() * \
-                #                    tgt_box_mask.float())
+                tgt_similarities = ((images_color_similarities >= self.pairwose_color_thresh).float() * \
+                                   tgt_box_mask.float())
 
+            warmup_factor = min(self._iter.item() / float(self.pairwise_warmup_iters), 1.0)
             with autocast(enabled=False):
                 src_mask_x = src_mask_x.float()
                 tgt_mask_x = tgt_mask_x.float()
@@ -340,14 +347,14 @@ class HungarianMatcherWeakSup(nn.Module):
                 cost_projection = cost_dice_x + cost_dice_y
 
                 # Compute the pairwise cost
-                # cost_pairwise = batch_parirwise_loss_jit(src_similarities, tgt_similarities)
+                cost_pairwise = batch_parirwise_loss_jit(src_similarities, tgt_similarities) * warmup_factor
 
 
             # Final cost matrix
             C = (
                 self.cost_class * cost_class +
-                self.cost_projection * cost_projection
-                # self.cost_pairwise * cost_pairwise
+                self.cost_projection * cost_projection +
+                self.cost_pairwise * cost_pairwise
             )
 
             C = C.reshape(num_queries, -1).cpu()
@@ -380,6 +387,7 @@ class HungarianMatcherWeakSup(nn.Module):
             For each batch element, it holds:
                 len(index_i) = len(index_j) = min(num_queries, num_target_boxes)
         """
+        self._iter += 1
         return self.memory_efficient_forward(outputs, targets)
 
     def __repr__(self, _repr_indent=4):
