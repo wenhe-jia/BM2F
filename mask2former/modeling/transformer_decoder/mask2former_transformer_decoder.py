@@ -392,7 +392,6 @@ class MultiScaleMaskedTransformerDecoder(nn.Module):
         outputs_class, outputs_mask, attn_mask = self.forward_prediction_heads(
             output, mask_features, attn_mask_target_size=size_list[0]
         )
-        # outputs_class, outputs_mask = self.forward_prediction_heads_wo_att_mask(output, mask_features)
         predictions_class.append(outputs_class)
         predictions_mask.append(outputs_mask)
 
@@ -403,7 +402,6 @@ class MultiScaleMaskedTransformerDecoder(nn.Module):
             output = self.transformer_cross_attention_layers[i](
                 output, src[level_index],
                 memory_mask=attn_mask,
-                # memory_mask=None,
                 memory_key_padding_mask=None,  # here we do not apply masking on padded region
                 pos=pos[level_index], query_pos=query_embed
             )
@@ -422,7 +420,6 @@ class MultiScaleMaskedTransformerDecoder(nn.Module):
             outputs_class, outputs_mask, attn_mask = self.forward_prediction_heads(
                 output, mask_features, attn_mask_target_size=size_list[(i + 1) % self.num_feature_levels]
             )
-            # outputs_class, outputs_mask = self.forward_prediction_heads_wo_att_mask(output, mask_features)
             predictions_class.append(outputs_class)
             predictions_mask.append(outputs_mask)
 
@@ -453,15 +450,6 @@ class MultiScaleMaskedTransformerDecoder(nn.Module):
         attn_mask = attn_mask.detach()
 
         return outputs_class, outputs_mask, attn_mask
-
-    def forward_prediction_heads_wo_att_mask(self, output, mask_features):
-        decoder_output = self.decoder_norm(output)
-        decoder_output = decoder_output.transpose(0, 1)
-        outputs_class = self.class_embed(decoder_output)
-        mask_embed = self.mask_embed(decoder_output)
-        outputs_mask = torch.einsum("bqc,bchw->bqhw", mask_embed, mask_features)
-
-        return outputs_class, outputs_mask
 
     @torch.jit.unused
     def _set_aux_loss(self, outputs_class, outputs_seg_masks):

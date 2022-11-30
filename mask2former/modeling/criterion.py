@@ -91,33 +91,6 @@ def calculate_uncertainty(logits):
     return -(torch.abs(gt_class_logits))
 
 
-def unfold_wo_center(x, kernel_size, dilation):
-    # 在每个点的周围取一系列值，图像之外pad的部分就是0了
-    assert x.dim() == 4
-    assert kernel_size % 2 == 1
-
-    # using SAME padding
-    padding = (kernel_size + (dilation - 1) * (kernel_size - 1)) // 2
-    unfolded_x = F.unfold(
-        x, kernel_size=kernel_size,
-        padding=padding,
-        dilation=dilation
-    )  # (1, 3*k*k, h*w )
-
-    unfolded_x = unfolded_x.reshape(
-        x.size(0), x.size(1), -1, x.size(2), x.size(3)
-    )  # (1, 3, k*k, h, w)
-
-    # remove the center pixels
-    size = kernel_size ** 2
-    unfolded_x = torch.cat((
-        unfolded_x[:, :, :size // 2],
-        unfolded_x[:, :, size // 2 + 1:]
-    ), dim=2)  # (1, 3, k*k-1, h, w)
-
-    return unfolded_x
-
-
 def projection_dice_loss(
         inputs_x: torch.Tensor,
         targets_x: torch.Tensor,
@@ -312,117 +285,6 @@ class SetCriterionWeakSup(nn.Module):
         del target_similarities
         return losses
 
-    def loss_pairwise(self, outputs, targets, indices, num_masks):
-        """
-            Compute the losses related to the masks: the 1D projection loss.
-            targets dicts must contain the key "masks" containing a tensor of dim [nb_target_boxes, h, w]
-        """
-        assert "pred_masks" in outputs
-
-        src_idx = self._get_src_permutation_idx(indices)
-        tgt_idx = self._get_tgt_permutation_idx(indices)
-        src_masks = outputs["pred_masks"]
-        src_masks = src_masks[src_idx]
-
-        box_masks = [t["box_masks"] for t in targets]
-        # TODO use valid to mask invalid areas due to padding in loss
-        target_box_masks, valid = nested_tensor_from_tensor_list(box_masks).decompose()
-        target_box_masks = target_box_masks.to(src_masks)
-        target_box_masks = target_box_masks[tgt_idx]
-
-        similarities = [t['images_color_similarity'] for t in targets]  # [(N, k*k-1, H, W)] * n
-        target_similarities, valid = nested_tensor_from_tensor_list(similarities).decompose()  # dtype=torch.float32
-        target_similarities = target_similarities.to(src_masks)  # dtype=torch.float16
-        target_similarities = target_similarities[tgt_idx]  # (N, k*k-1, H/4, W/4)
-
-        # No need to upsample predictions as we are using normalized coordinates :)
-        # N x 1 x H/4 x W/4
-        src_masks = src_masks[:, None]
-        target_box_masks = target_box_masks[:, None]
-
-        # Prepare data for pairwise loss
-        log_fg_prob = F.logsigmoid(src_masks)
-        log_bg_prob = F.logsigmoid(-src_masks)
-        # 此处取出的值是每个点周围k*k个点的概率（前/背景）
-        log_fg_prob_unfold = unfold_wo_center(
-            log_fg_prob, kernel_size=self.pairwise_size, dilation=self.pairwise_dilation
-        )  # (N, 1, k*k-1, H/4, W/4)
-        log_bg_prob_unfold = unfold_wo_center(
-            log_bg_prob, kernel_size=self.pairwise_size, dilation=self.pairwise_dilation
-        )  # (N, 1, k*k-1, H/4, W/4)
-
-        # the probability of making the same prediction = p_i * p_j + (1 - p_i) * (1 - p_j)
-        # we compute the probability in log space to avoid numerical instability
-        log_same_fg_prob = log_fg_prob[:, :, None] + log_fg_prob_unfold  # (N, 1, k*k-1, H/4, W/4)
-        log_same_bg_prob = log_bg_prob[:, :, None] + log_bg_prob_unfold  # (N, 1, k*k-1, H/4, W/4)
-
-        max_ = torch.max(log_same_fg_prob, log_same_bg_prob)
-        log_same_prob = torch.log(
-            torch.exp(log_same_fg_prob - max_) +
-            torch.exp(log_same_bg_prob - max_)
-        ) + max_
-
-        src_similarities = -log_same_prob[:, 0]  # (N, k*k-1, H/4, W/4)
-
-        with torch.no_grad():
-            _target_similarities = (target_similarities >= self.pairwise_color_thresh).float() * \
-                                   target_box_masks.float()
-
-        warmup_factor = min(self._iter.item() / float(self.pairwise_warmup_iters), 1.0)
-        losses = {
-            "loss_pairwise": pairwise_loss_jit(src_similarities, _target_similarities, num_masks) * warmup_factor
-        }
-
-        del src_masks
-        del target_box_masks
-        del target_similarities
-        return losses
-    
-    def loss_projection_masks(self, outputs, targets, indices, num_masks):
-        """
-            Compute the losses related to the masks: the 1D projection loss.
-            targets dicts must contain the key "masks" containing a tensor of dim [nb_target_boxes, h, w]
-        """
-        assert "pred_masks" in outputs
-
-        src_idx = self._get_src_permutation_idx(indices)
-        tgt_idx = self._get_tgt_permutation_idx(indices)
-        src_masks = outputs["pred_masks"]
-        src_masks = src_masks[src_idx]
-
-        # masks: [(num_gt_2, H, W), (num_gt_1, H, W), ...]
-        masks = [t["box_masks"] for t in targets]
-        # TODO use valid to mask invalid areas due to padding in loss
-        # target_masks: (B, max_num_gt, H, W)
-        target_masks, valid = nested_tensor_from_tensor_list(masks).decompose()
-        target_masks = target_masks.to(src_masks)
-        target_masks = target_masks[tgt_idx]  # (num_gt-1+num_gt_2+..., H, W)
-
-        # No need to upsample predictions as we are using normalized coordinates :)
-        # N x 1 x H/4 x W/4
-        src_masks = src_masks[:, None]
-        target_masks = target_masks[:, None]
-
-        # Prepare data for projection loss, project mask to x & y axis
-        # masks_x: (num_ins, 1, H_pad/4, 1)->(num_ins, H_pad/4)
-        # masks_y: (num_ins, 1, 1, W_pad/4)->(num_ins, W_pad/4)
-        src_masks_x = src_masks.max(dim=3, keepdim=True)[0].flatten(1, 3)
-        src_masks_y = src_masks.max(dim=2, keepdim=True)[0].flatten(1, 3)
-
-        with torch.no_grad():
-            target_masks_x = target_masks.max(dim=3, keepdim=True)[0].flatten(1, 3)
-            target_masks_y = target_masks.max(dim=2, keepdim=True)[0].flatten(1, 3)
-
-        losses = {
-            "loss_mask_projection": projection_dice_loss_jit(
-                src_masks_x, target_masks_x, src_masks_y, target_masks_y, num_masks
-            )
-        }
-
-        del src_masks
-        del target_masks
-        return losses
-
     def _get_src_permutation_idx(self, indices):
         # permute predictions following indices
         batch_idx = torch.cat([torch.full_like(src, i) for i, (src, _) in enumerate(indices)])
@@ -439,9 +301,6 @@ class SetCriterionWeakSup(nn.Module):
         loss_map = {
             'labels': self.loss_labels,
             'projection_and_pairwise': self.loss_projection_and_pairwise,
-            # 'projection_masks': self.loss_projection_masks,
-            # "color_similarities": self.loss_pairwise
-
         }
         assert loss in loss_map, f"do you really want to compute {loss} loss?"
         return loss_map[loss](outputs, targets, indices, num_masks)
