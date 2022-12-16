@@ -291,7 +291,6 @@ class VideoMaskFormer(nn.Module):
 
             # rectangle gt mask from boxes for mask projection loss
             # TODO: add images_color_similarity for pairwise loss
-            box_mask_full_per_video = torch.zeros(mask_shape, device=self.device)  # (N, T, H, W)
             box_mask_per_video = []
             gt_ids_per_video = []
             for f_i, targets_per_frame in enumerate(targets_per_video["instances"]):
