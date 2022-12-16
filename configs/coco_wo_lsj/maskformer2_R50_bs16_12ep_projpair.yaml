@@ -7,12 +7,15 @@ MODEL:
       MASK_TARGET_TYPE: "projection_and_pairwise"
       PAIRWISE:
         WARMUP_ITERS: 40000
+        POINT_SAMPLE: True
 SOLVER:
   IMS_PER_BATCH: 4  # 16
   BASE_LR: 0.000025  # 0.0001
   STEPS: (240000, 320000)  # (60000, 80000)
   MAX_ITER: 360000  # 90000
+#  AMP:
+#    ENABLED: False
 TEST:
   EVAL_PERIOD: 40000
-#DATASETS:
-#  TRAIN: ("coco_train_debug",)
+#INPUT:
+#  MIN_SIZE_TRAIN: (800, )  # (512, 640, 704, 768, 800, 864)

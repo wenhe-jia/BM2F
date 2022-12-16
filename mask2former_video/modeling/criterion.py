@@ -125,7 +125,7 @@ def calculate_uncertainty(logits):
     return -(torch.abs(gt_class_logits))
 
 
-class VideoSetCriterionWeakSup(nn.Module):
+class VideoSetCriterionProjMask(nn.Module):
     """This class computes the loss for DETR.
     The process happens in two steps:
         1) we compute hungarian assignment between ground truth boxes and the outputs of the model
@@ -169,7 +169,7 @@ class VideoSetCriterionWeakSup(nn.Module):
         losses = {"loss_ce": loss_ce}
         return losses
 
-    def loss_weaksup_masks(self, outputs, targets, indices, num_masks):
+    def loss_projection_masks(self, outputs, targets, indices, num_masks):
         """Compute the losses related to the masks: the 1D projection loss and the pairwise loss.
         targets dicts must contain the key "masks" containing a tensor of dim [nb_target_boxes, h, w]
         """
@@ -186,7 +186,7 @@ class VideoSetCriterionWeakSup(nn.Module):
         # No need to upsample predictions as we are using normalized coordinates :)
         # (N, T, H_pad/4, W_pad/4)->(NT, 1, H_pad/4, W_pad/4)
         src_masks = src_masks.flatten(0, 1)[:, None]
-        target_masks = target_box_masks.flatten(0, 1)[:, None]
+        target_box_masks = target_box_masks.flatten(0, 1)[:, None]
 
         # project mask to x & y axis
         # masks_x: (num_ins*T, H_pad/4)
@@ -195,17 +195,17 @@ class VideoSetCriterionWeakSup(nn.Module):
         src_masks_y = src_masks.max(dim=2, keepdim=True)[0].flatten(1, 3)
 
         with torch.no_grad():
-            target_masks_x = target_masks.max(dim=3, keepdim=True)[0].flatten(1, 3)
-            target_masks_y = target_masks.max(dim=2, keepdim=True)[0].flatten(1, 3)
+            target_box_masks_x = target_box_masks.max(dim=3, keepdim=True)[0].flatten(1, 3)
+            target_box_masks_y = target_box_masks.max(dim=2, keepdim=True)[0].flatten(1, 3)
 
         losses = {
             "loss_mask_projection": projection_dice_loss_jit(
-                src_masks_x, target_masks_x, src_masks_y, target_masks_y, num_masks
+                src_masks_x, target_box_masks_x, src_masks_y, target_box_masks_y, num_masks
             )
         }
 
-        del src_masks
-        del target_masks
+        del src_masks, src_masks_x, src_masks_y
+        del target_masks, target_box_masks_x, target_box_masks_y
         return losses
 
     def _get_src_permutation_idx(self, indices):
@@ -238,8 +238,6 @@ class VideoSetCriterionWeakSup(nn.Module):
             "labels": (num_gt,)
             "ids": (num_gt, T)
             "masks": (num_gt, T, H, W)
-            "boxes": (num_gt, T, 4), relative coordinates to padded image size
-            "box_masks_full": (num_gt, T, H, W)
             "box_masks": (num_gt, T, H/4, W/4)
         """
         outputs_without_aux = {k: v for k, v in outputs.items() if k != "aux_outputs"}

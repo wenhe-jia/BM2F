@@ -68,48 +68,14 @@ batch_sigmoid_ce_loss_jit = torch.jit.script(
 )  # type: torch.jit.ScriptModule
 
 
-def box_iou(boxes1, boxes2):
-    area1 = box_area(boxes1)
-    area2 = box_area(boxes2)
-
-    lt = torch.max(boxes1[:, None, :2], boxes2[:, :2])  # [N,M,2]
-    rb = torch.min(boxes1[:, None, 2:], boxes2[:, 2:])  # [N,M,2]
-
-    wh = (rb - lt).clamp(min=0)  # [N,M,2]
-    inter = wh[:, :, 0] * wh[:, :, 1]  # [N,M]
-
-    union = area1[:, None] + area2 - inter
-
-    iou = inter / union
-    return iou, union
+def calculate_axis_projection(out_mask, tgt_box_mask, axis):
+    with autocast(enabled=False):
+        src_mask_axis = out_mask.max(dim=axis, keepdim=True)[0].flatten(1, 3).float()
+        tgt_box_mask_axis = tgt_box_mask.max(dim=axis, keepdim=True)[0].flatten(1, 3).float()
+    return batch_dice_loss_jit(src_mask_axis, tgt_box_mask_axis)
 
 
-def generalized_box_iou(boxes1, boxes2):
-    """
-    Generalized IoU from https://giou.stanford.edu/
-
-    The boxes should be in [x0, y0, x1, y1] format
-
-    Returns a [N, M] pairwise matrix, where N = len(boxes1)
-    and M = len(boxes2)
-    """
-    # degenerate boxes gives inf / nan results
-    # so do an early check
-
-    assert (boxes1[:, 2:] >= boxes1[:, :2]).all()
-    assert (boxes2[:, 2:] >= boxes2[:, :2]).all()
-    iou, union = box_iou(boxes1, boxes2)
-
-    lt = torch.min(boxes1[:, None, :2], boxes2[:, :2])
-    rb = torch.max(boxes1[:, None, 2:], boxes2[:, 2:])
-
-    wh = (rb - lt).clamp(min=0)  # [N,M,2]
-    area = wh[:, :, 0] * wh[:, :, 1]
-
-    return iou - (area - union) / (area + 1e-7)
-
-
-class VideoHungarianMatcherBox(nn.Module):
+class VideoHungarianMatcherProjMask(nn.Module):
     """This class computes an assignment between the targets and the predictions of the network
 
     For efficiency reasons, the targets don't include the no_object. Because of this, in general,
@@ -117,12 +83,7 @@ class VideoHungarianMatcherBox(nn.Module):
     while the others are un-matched (and thus treated as non-objects).
     """
 
-    def __init__(
-            self,
-            cost_class: float = 1,
-            cost_bbox: float = 1,
-            cost_giou: float = 1,
-    ):
+    def __init__(self, cost_class: float = 1, cost_projection: float = 1):
         """Creates the matcher
 
         Params:
@@ -131,11 +92,10 @@ class VideoHungarianMatcherBox(nn.Module):
             cost_dice: This is the relative weight of the dice loss of the binary mask in the matching cost
         """
         super().__init__()
-        self.cost_class = cost_class  # 2
-        self.cost_bbox = cost_bbox  # 5
-        self.cost_giou = cost_giou  # 2
+        self.cost_class = cost_class
+        self.cost_projection = cost_projection
 
-        assert cost_class != 0 or cost_bbox != 0 or cost_giou != 0, "all costs cant be 0"
+        assert cost_class != 0 or cost_projection != 0, "all costs cant be 0"
 
     @torch.no_grad()
     def memory_efficient_forward(self, outputs, targets):
@@ -146,52 +106,32 @@ class VideoHungarianMatcherBox(nn.Module):
 
         # Iterate through batch size
         for b in range(bs):
-
             out_prob = outputs["pred_logits"][b].softmax(-1)  # [num_queries, num_classes]
             tgt_ids = targets[b]["labels"]
 
             # Compute the classification cost. Contrary to the loss, we don't use the NLL,
             # but approximate it in 1 - proba[target class].
             # The 1 is a constant that doesn't change the matching, it can be ommitted.
-            cost_class = -out_prob[:, tgt_ids]
-
-            # Prepare output and target bounding boxes.
-            # Use the predicted mask to find tight bounding boxes to calculate box cost.
-            tgt_bboxes = targets[b]["boxes"]  # (num_gt, T, 4)
+            cost_class = -out_prob[:, tgt_ids]  # (num_queries, num_classes) --> (num_queries, num_gt)
 
             out_mask = outputs["pred_masks"][b]  # [num_queries, T, H_pred, W_pred]
-            rel_out_boxes = torch.zeros(
-                (out_mask.shape[0], out_mask.shape[1], 4), dtype=torch.float, device=out_mask.device
-            )  #（num_queries, T, 4）
-            h_out, w_out = float(out_mask.shape[2]), float(out_mask.shape[3])
-            for out_i in range(out_mask.shape[0]):
-                for frame_i in range(out_mask.shape[1]):
-                    ins_frame_mask = out_mask[out_i, frame_i, :, :]
-                    (ys, xs) = torch.where(ins_frame_mask > 0)
+            # gt masks are already padded when preparing target
+            tgt_box_mask = targets[b]["box_masks"].to(out_mask)  # [num_gts, T, H_pred, W_pred], 有可能有空的mask(dummy)
 
-                    if xs.shape[0] > 0:
-                        rel_out_box = torch.tensor(
-                            [xs.min() / w_out, ys.min() / h_out, xs.max() / w_out, ys.max() / h_out],
-                            device=out_mask.device
-                        )
-                    else:
-                        rel_out_box = torch.zeros(4, dtype=torch.float, device=out_mask.device)
-                    rel_out_boxes[out_i, frame_i, :] = rel_out_box
 
-            # Compute bounding box L2 cost.
-            cost_bbox = torch.cdist(rel_out_boxes.flatten(1, 2), tgt_bboxes.flatten(1, 2))  # (num_query, num_gt)
+            with autocast(enabled=False):
+                cost_projection = calculate_axis_projection(out_mask, tgt_box_mask, 3) + \
+                                  calculate_axis_projection(out_mask, tgt_box_mask, 2)
 
-            # Compute bounding box GIoU cost.
-            cost_giou = 0
-            num_frame = out_mask.shape[1]
-            torch.clip(tgt_bboxes, min=1e-7, max=1)
-            for frame_ind in range(num_frame):
-                cost_giou += -generalized_box_iou(rel_out_boxes[:, frame_ind, :], tgt_bboxes[:, frame_ind, :])
-            cost_giou = cost_giou / num_frame
-
-            C = self.cost_class * cost_class + self.cost_bbox * cost_bbox + self.cost_giou * cost_giou
+            # Final cost matrix
+            C = (
+                    self.cost_mask * cost_mask
+                    + self.cost_class * cost_class
+                    + self.cost_dice * cost_dice
+            )  # (num_query, num_gt)
             C = C.reshape(num_queries, -1).cpu()
-            indices.append(linear_sum_assignment(C))
+
+            indices.append(linear_sum_assignment(C))  # [( query_idxs: ndarray(num_gt,), gt_idxs: ndarray(num_gt,))]
 
         return [
             (torch.as_tensor(i, dtype=torch.int64), torch.as_tensor(j, dtype=torch.int64))
@@ -200,20 +140,40 @@ class VideoHungarianMatcherBox(nn.Module):
 
     @torch.no_grad()
     def forward(self, outputs, targets):
+        """Performs the matching
+
+        Params:
+            outputs: This is a dict that contains at least these entries:
+                 "pred_logits": Tensor of dim [batch_size, num_queries, num_classes] with the classification logits
+                 "pred_masks": Tensor of dim [batch_size, num_queries, H_pred, W_pred] with the predicted masks
+
+            targets: This is a list of targets (len(targets) = batch_size), where each target is a dict containing:
+                 "labels": Tensor of dim [num_target_boxes] (where num_target_boxes is the number of ground-truth
+                           objects in the target) containing the class labels
+                 "masks": Tensor of dim [num_target_boxes, H_gt, W_gt] containing the target masks
+
+        Returns:
+            A list of size batch_size, containing tuples of (index_i, index_j) where:
+                - index_i is the indices of the selected predictions (in order)
+                - index_j is the indices of the corresponding selected targets (in order)
+            For each batch element, it holds:
+                len(index_i) = len(index_j) = min(num_queries, num_target_boxes)
+        """
         return self.memory_efficient_forward(outputs, targets)
 
     def __repr__(self, _repr_indent=4):
         head = "Matcher " + self.__class__.__name__
         body = [
             "cost_class: {}".format(self.cost_class),
-            "cost_bbox: {}".format(self.cost_bbox),
-            "cost_giou: {}".format(self.cost_giou),
+            "cost_mask: {}".format(self.cost_mask),
+            "cost_dice: {}".format(self.cost_dice),
         ]
         lines = [head] + [" " * _repr_indent + line for line in body]
         return "\n".join(lines)
 
 
-class VideoHungarianMatcherMask(nn.Module):
+
+class VideoHungarianMatcher(nn.Module):
     """This class computes an assignment between the targets and the predictions of the network
 
     For efficiency reasons, the targets don't include the no_object. Because of this, in general,

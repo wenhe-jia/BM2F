@@ -264,6 +264,7 @@ class YTVISDatasetMapper:
                 instances = filter_empty_instances(instances)
             else:
                 instances.gt_masks = BitMasks(torch.empty((0, *image_shape)))
+                instances.gt_boxes = instances.gt_masks.get_bounding_boxes()
             dataset_dict["instances"].append(instances)
 
         return dataset_dict

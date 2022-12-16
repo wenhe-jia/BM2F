@@ -17,7 +17,7 @@ from detectron2.structures import Boxes, ImageList, Instances, BitMasks
 from detectron2.utils.memory import retry_if_cuda_oom
 from detectron2.structures.masks import BitMasks
 
-from .modeling.criterion import SetCriterionProjection, SetCriterion, SetCriterionWeakSup
+from .modeling.criterion import SetCriterion, SetCriterionProjection, SetCriterionWeakSup
 from .modeling.matcher import HungarianMatcherMask, HungarianMatcherProjMask, HungarianMatcherWeakSup
 from .utils.weaksup_utils import unfold_wo_center, get_images_color_similarity
 
@@ -51,6 +51,7 @@ class MaskFormer(nn.Module):
         panoptic_on: bool,
         instance_on: bool,
         test_topk_per_image: int,
+        # pairwise
         pairwise_size: int,
         pairwise_dilation: int
     ):
@@ -125,13 +126,7 @@ class MaskFormer(nn.Module):
         mask_target_type = cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_TARGET_TYPE
 
         if weak_supervision:
-            if mask_target_type == "box_mask":
-                weight_dict = {
-                    "loss_ce": cfg.MODEL.MASK_FORMER.CLASS_WEIGHT,
-                    "loss_mask": cfg.MODEL.MASK_FORMER.MASK_WEIGHT,
-                    "loss_dice": cfg.MODEL.MASK_FORMER.DICE_WEIGHT
-                }
-            elif mask_target_type == "projection_mask":
+            if mask_target_type == "projection_mask":
                 weight_dict = {
                     "loss_ce": cfg.MODEL.MASK_FORMER.CLASS_WEIGHT,
                     "loss_mask_projection": cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_PROJECTION_WEIGHT
@@ -152,7 +147,7 @@ class MaskFormer(nn.Module):
             }
 
         # build matcher
-        if matcher_target_type == "mask" or matcher_target_type == "box_mask":
+        if matcher_target_type == "mask":
             matcher = HungarianMatcherMask(
                 cost_class=cfg.MODEL.MASK_FORMER.CLASS_WEIGHT,
                 cost_mask=cfg.MODEL.MASK_FORMER.MASK_WEIGHT,
@@ -187,7 +182,37 @@ class MaskFormer(nn.Module):
             weight_dict.update(aux_weight_dict)
 
         # build criterion
-        if not weak_supervision:
+        if weak_supervision:
+            if mask_target_type == "projection_mask":
+                losses = ["labels", "projection_masks"]
+                criterion = SetCriterionProjection(
+                    sem_seg_head.num_classes,
+                    matcher=matcher,
+                    weight_dict=weight_dict,
+                    eos_coef=no_object_weight,
+                    losses=losses,
+                )
+            elif mask_target_type == "projection_and_pairwise":
+                # losses = ["labels", "projection_masks", "pairwise"]
+                losses = ["labels", "pairwise"]
+                criterion = SetCriterionWeakSup(
+                    sem_seg_head.num_classes,
+                    matcher=matcher,
+                    weight_dict=weight_dict,
+                    eos_coef=no_object_weight,
+                    pairwise_size=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.SIZE,
+                    pairwise_dilation=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.DILATION,
+                    pairwise_color_thresh=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.COLOR_THRESH,
+                    pairwise_warmup_iters=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.WARMUP_ITERS,
+                    losses=losses,
+                    point_sample=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.POINT_SAMPLE,
+                    num_points=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.TRAIN_NUM_POINTS,
+                    oversample_ratio=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.OVERSAMPLE_RATIO,
+                    importance_sample_ratio=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.IMPORTANCE_SAMPLE_RATIO,
+                )
+            else:
+                raise Exception("Unknown mask_target_type type !!!")
+        else:
             losses = ["labels", "masks"]
             criterion = SetCriterion(
                 sem_seg_head.num_classes,
@@ -200,45 +225,6 @@ class MaskFormer(nn.Module):
                 importance_sample_ratio=cfg.MODEL.MASK_FORMER.IMPORTANCE_SAMPLE_RATIO,
                 mask_target_type="mask",
             )
-        else:
-            if mask_target_type == "box_mask":
-                losses = ["labels", "masks"]
-                criterion = SetCriterion(
-                    sem_seg_head.num_classes,
-                    matcher=matcher,
-                    weight_dict=weight_dict,
-                    eos_coef=no_object_weight,
-                    losses=losses,
-                    num_points=cfg.MODEL.MASK_FORMER.TRAIN_NUM_POINTS,
-                    oversample_ratio=cfg.MODEL.MASK_FORMER.OVERSAMPLE_RATIO,
-                    importance_sample_ratio=cfg.MODEL.MASK_FORMER.IMPORTANCE_SAMPLE_RATIO,
-                    mask_target_type="box_mask",
-                )
-            elif mask_target_type == "projection_mask":
-                losses = ["labels", "projection_masks"]
-                criterion = SetCriterionProjection(
-                    sem_seg_head.num_classes,
-                    matcher=matcher,
-                    weight_dict=weight_dict,
-                    eos_coef=no_object_weight,
-                    losses=losses,
-                )
-            elif mask_target_type == "projection_and_pairwise":
-                losses = ["labels", "projection_and_pairwise"]
-                criterion = SetCriterionWeakSup(
-                    sem_seg_head.num_classes,
-                    matcher=matcher,
-                    weight_dict=weight_dict,
-                    eos_coef=no_object_weight,
-                    pairwise_size=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.SIZE,
-                    pairwise_dilation=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.DILATION,
-                    pairwise_color_thresh=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.COLOR_THRESH,
-                    pairwise_warmup_iters=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.WARMUP_ITERS,
-                    losses=losses,
-                )
-            else:
-                raise Exception("Unknown mask_target_type type !!!")
-
 
         return {
             "backbone": backbone,
@@ -296,13 +282,28 @@ class MaskFormer(nn.Module):
                     segments_info (list[dict]): Describe each segment in `panoptic_seg`.
                         Each dict contains keys "id", "category_id", "isthing".
         """
+        # print('='*10,'Start','='*10)
+        # m1 = torch.cuda.memory_allocated()
+        # print('MODEL start memory cost:', m1 / (1024 * 1024), 'MB')
+        # mmax = torch.cuda.max_memory_allocated()
+        # print('MODEL start max memory cost:', mmax / (1024 * 1024), 'MB')
+
         original_images = [x["image"].to(self.device) for x in batched_inputs]
         images = [(x - self.pixel_mean) / self.pixel_std for x in original_images]
         images = ImageList.from_tensors(images, self.size_divisibility)
         # cv2.imwrite('debug/model/img.png', batched_inputs[0]['image'].numpy().transpose(1, 2, 0))
 
+        # m2 = torch.cuda.memory_allocated()
         features = self.backbone(images.tensor)
+        # m3 = torch.cuda.memory_allocated()
+        # print('features memory cost:', (m3-m2) / (1024 * 1024), 'MB')
+        # mmax = torch.cuda.max_memory_allocated()
+        # print('features max memory cost:', mmax / (1024 * 1024), 'MB')
         outputs = self.sem_seg_head(features)
+        # m4 = torch.cuda.memory_allocated()
+        # print('outputs memory cost:', (m4-m3) / (1024 * 1024), 'MB')
+        # mmax = torch.cuda.max_memory_allocated()
+        # print('outputs max memory cost:', mmax / (1024 * 1024), 'MB')
 
         if self.training:
             # mask classification target
@@ -325,6 +326,10 @@ class MaskFormer(nn.Module):
                 else:
                     # remove this loss if not specified in `weight_dict`
                     losses.pop(k)
+            # mend = torch.cuda.memory_allocated()
+            # print('MODEL end memory cost:', mend / (1024 * 1024), 'MB')
+            # mmax = torch.cuda.max_memory_allocated()
+            # print('MODEL end max memory cost:', mmax / (1024 * 1024), 'MB\n')
             return losses
         else:
             mask_cls_results = outputs["pred_logits"]
@@ -393,6 +398,7 @@ class MaskFormer(nn.Module):
         return new_targets
 
     def prepare_weaksup_targets(self, targets, org_images, img_heights):
+        # 使用没有经过ImageList之前的图像是为了把每张mask底部的若干像素置为0
         # masks of org image shape
         org_image_masks = [torch.ones_like(x[0], dtype=torch.float32) for x in org_images]
         # mask out the bottom area where the COCO dataset probably has wrong annotations
@@ -421,7 +427,7 @@ class MaskFormer(nn.Module):
         downsampled_image_masks = original_image_masks[:, start::stride, start::stride]  # (N, H/4, W/4), do not use interpolate to ensure org pixel
 
         h_pad, w_pad = original_images.shape[-2:]  ###
-        new_targets = []
+        new_targets = []  # store targets of each image
         for im_ind, targets_per_image in enumerate(targets):
             images_lab = color.rgb2lab(downsampled_images[im_ind].byte().permute(1, 2, 0).cpu().numpy()[:, :, ::-1])  # (H/4, W/4, 3)
             images_lab = torch.as_tensor(images_lab, device=downsampled_images.device, dtype=torch.float32)
@@ -430,8 +436,6 @@ class MaskFormer(nn.Module):
                 images_lab, downsampled_image_masks[im_ind],
                 self.pairwise_size, self.pairwise_dilation
             )  # (1, k*k-1, H/4, W/4)
-            # np.save("/home/user/Program/jwh/weakly-spvsd-vis/Weakly-Sup-VIS/debug-ProjPair/similarity-m2f.npy", images_color_similarity.cpu().numpy())
-
 
             gt_boxes = targets_per_image.gt_boxes.tensor  # (N, 4)
             box_masks_full_per_image = torch.zeros(
@@ -454,14 +458,15 @@ class MaskFormer(nn.Module):
             new_targets.append(
                 {
                     "labels": targets_per_image.gt_classes,
-                    "box_masks_full": box_masks_full_per_image,
+                    # "box_masks_full": box_masks_full_per_image,
                     "box_masks": box_masks_per_image,
                     "images_color_similarity": torch.cat(
                         [images_color_similarity for _ in range(len(targets_per_image))], dim=0
                     )  # (image_gt_num, k*k-1, H/4, W/4)
                 }
             )
-
+        # m2 = torch.cuda.memory_allocated()
+        # print('m2 memory cost:', m2 / (1024 * 1024), 'MB\n')
         return new_targets
 
     def semantic_inference(self, mask_cls, mask_pred):

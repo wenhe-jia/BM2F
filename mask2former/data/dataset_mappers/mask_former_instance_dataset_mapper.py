@@ -93,6 +93,11 @@ class MaskFormerInstanceDatasetMapper:
             dict: a format that builtin models in detectron2 accept
         """
         assert self.is_train, "MaskFormerPanopticDatasetMapper should only be used for training!"
+        # print('='*10,'Mapper','='*10)
+        # m1 = torch.cuda.memory_allocated()
+        # print('Mapper start memory cost:', m1 / (1024 * 1024), 'MB')
+        # mmax = torch.cuda.max_memory_allocated()
+        # print('Mapper start max memory cost:', mmax / (1024 * 1024), 'MB')
 
         dataset_dict = copy.deepcopy(dataset_dict)  # it will be modified by code below
         image = utils.read_image(dataset_dict["file_name"], format=self.img_format)
@@ -177,7 +182,11 @@ class MaskFormerInstanceDatasetMapper:
 
         # for weak supervision
         instances.gt_boxes = BitMasks(instances.gt_masks).get_bounding_boxes()
-
+        # TODO: delete gt_mask
         dataset_dict["instances"] = instances
 
+        # mend = torch.cuda.memory_allocated()
+        # print('Mapper end memory cost:', mend / (1024 * 1024), 'MB')
+        # mmax = torch.cuda.max_memory_allocated()
+        # print('Mapper end max memory cost:', mmax / (1024 * 1024), 'MB\n')
         return dataset_dict

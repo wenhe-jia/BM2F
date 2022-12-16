@@ -14,8 +14,8 @@ from detectron2.modeling.backbone import Backbone
 from detectron2.modeling.postprocessing import sem_seg_postprocess
 from detectron2.structures import Boxes, ImageList, Instances, BitMasks
 
-from .modeling.criterion import VideoSetCriterionWeakSup, VideoSetCriterion
-from .modeling.matcher import VideoHungarianMatcherBox, VideoHungarianMatcherMask
+from .modeling.criterion import VideoSetCriterion, VideoSetCriterionProjMask
+from .modeling.matcher import VideoHungarianMatcher, VideoHungarianMatcherProjMask
 from .utils.memory import retry_if_cuda_oom
 
 logger = logging.getLogger(__name__)
@@ -89,6 +89,7 @@ class VideoMaskFormer(nn.Module):
         self.num_frames = num_frames
 
         self.weak_supervision = weak_supervision
+        self.mask_out_stride = 4
 
     @classmethod
     def from_config(cls, cfg):
@@ -99,37 +100,36 @@ class VideoMaskFormer(nn.Module):
         deep_supervision = cfg.MODEL.MASK_FORMER.DEEP_SUPERVISION
         no_object_weight = cfg.MODEL.MASK_FORMER.NO_OBJECT_WEIGHT
 
+        # define supervision type
+        weak_supervision = cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.ENABLED
+        matcher_target_type = cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MATCHER_TYPE
+        mask_target_type = cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_TARGET_TYPE
+
         # classification loss weight
-        class_weight = cfg.MODEL.MASK_FORMER.CLASS_WEIGHT
-
-        weak_supervision = cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION
-
-        # building criterion
-        if not weak_supervision:
-            # loss weights for mask supervision
-            dice_weight = cfg.MODEL.MASK_FORMER.DICE_WEIGHT
-            mask_weight = cfg.MODEL.MASK_FORMER.MASK_WEIGHT
-            matcher = VideoHungarianMatcherMask(
-                cost_class=class_weight,
-                cost_mask=mask_weight,
-                cost_dice=dice_weight,
-                num_points=cfg.MODEL.MASK_FORMER.TRAIN_NUM_POINTS,
-            )
-            weight_dict = {"loss_ce": class_weight, "loss_mask": mask_weight, "loss_dice": dice_weight}
-            losses = ["labels", "masks"]
+        if weak_supervision:
+            if mask_target_type == "mask":
+                weight_dict = {
+                    "loss_ce": cfg.MODEL.MASK_FORMER.CLASS_WEIGHT,
+                    "loss_mask": cfg.MODEL.MASK_FORMER.MASK_WEIGHT,
+                    "loss_dice": cfg.MODEL.MASK_FORMER.DICE_WEIGHT
+                }
+            if mask_target_type == "projection_mask":
+                weight_dict = {
+                    "loss_ce": cfg.MODEL.MASK_FORMER.CLASS_WEIGHT,
+                    "loss_mask_projection": cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_PROJECTION_WEIGHT
+                }
+            elif mask_target_type == "projection_and_pairwise":
+                raise Exception("Unsupported yet!!!")
+            else:
+                raise Exception("Unknown mask_target_type type !!!")
         else:
-            # cost weights for box matcher
-            bbox_weight = cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.BBOX_WEIGHT
-            giou_weight = cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.GIOU_WEIGHT
-            matcher = VideoHungarianMatcherBox(
-                cost_class=class_weight,
-                cost_bbox=bbox_weight,
-                cost_giou=giou_weight,
-            )
-            mask_projection_weight = cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_PROJECTION_WEIGHT
-            weight_dict = {"loss_ce": class_weight, "loss_mask_projection": mask_projection_weight}
-            losses = ["labels", "weaksup_masks"]
+            weight_dict = {
+                "loss_ce": cfg.MODEL.MASK_FORMER.CLASS_WEIGHT,
+                "loss_mask": cfg.MODEL.MASK_FORMER.MASK_WEIGHT,
+                "loss_dice": cfg.MODEL.MASK_FORMER.DICE_WEIGHT
+            }
 
+        # set loss weight dict
         if deep_supervision:
             dec_layers = cfg.MODEL.MASK_FORMER.DEC_LAYERS
             aux_weight_dict = {}
@@ -137,9 +137,42 @@ class VideoMaskFormer(nn.Module):
                 aux_weight_dict.update({k + f"_{i}": v for k, v in weight_dict.items()})
             weight_dict.update(aux_weight_dict)
 
+        # building criterion
+        if matcher_target_type == "mask":
+            matcher = VideoHungarianMatcher(
+                cost_class=cfg.MODEL.MASK_FORMER.CLASS_WEIGHT,
+                cost_mask=cfg.MODEL.MASK_FORMER.MASK_WEIGHT,
+                cost_dice=cfg.MODEL.MASK_FORMER.DICE_WEIGHT,
+                num_points=cfg.MODEL.MASK_FORMER.TRAIN_NUM_POINTS,
+            )
+        elif matcher_target_type == "projection_mask":
+            matcher = VideoHungarianMatcherProjMask(
+                cost_class=cfg.MODEL.MASK_FORMER.CLASS_WEIGHT,
+                cost_projection=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_PROJECTION_WEIGHT,
+            )
+        elif matcher_target_type == "projection_and_pairwise":
+            raise Exception("Unsupported yet!!!")
+        else:
+            raise Exception("Unknown Matcher type !!!")
+
         # build criterion
-        if not weak_supervision:
-            criterion = VideoSetCriterionMask(
+        if weak_supervision:
+            if mask_target_type == "projection_mask":
+                losses = ["labels", "projection_masks"]
+                criterion = VideoSetCriterionProjMask(
+                    sem_seg_head.num_classes,
+                    matcher=matcher,
+                    weight_dict=weight_dict,
+                    eos_coef=no_object_weight,
+                    losses=losses,
+                )
+            elif mask_target_type == "projection_and_pairwise":
+                raise Exception("Unsupported yet!!!")
+            else:
+                raise Exception("Unknown mask_target_type type !!!")
+        else:
+            losses = ["labels", "masks"]
+            criterion = VideoSetCriterion(
                 sem_seg_head.num_classes,
                 matcher=matcher,
                 weight_dict=weight_dict,
@@ -148,14 +181,6 @@ class VideoMaskFormer(nn.Module):
                 num_points=cfg.MODEL.MASK_FORMER.TRAIN_NUM_POINTS,
                 oversample_ratio=cfg.MODEL.MASK_FORMER.OVERSAMPLE_RATIO,
                 importance_sample_ratio=cfg.MODEL.MASK_FORMER.IMPORTANCE_SAMPLE_RATIO,
-            )
-        else:
-            criterion = VideoSetCriterionWeakSup(
-                sem_seg_head.num_classes,
-                matcher=matcher,
-                weight_dict=weight_dict,
-                eos_coef=no_object_weight,
-                losses=losses,
             )
 
         return {
@@ -185,7 +210,7 @@ class VideoMaskFormer(nn.Module):
             batched_inputs: a list, batched outputs of :class:`DatasetMapper`.
                 Each item in the list contains the inputs for one image.
                 For now, each item in the list is a dict that contains:
-                   * "image": Tensor, image in (C, H, W) format.
+                   * "image": list[Tensor], frame in (C, H, W) format.
                    * "instances": per-region ground truth
                    * Other information that's included in the original dicts, such as:
                      "height", "width" (int): the output resolution of the model (may be different
@@ -217,7 +242,10 @@ class VideoMaskFormer(nn.Module):
 
         if self.training:
             # mask classification target
-            targets = self.prepare_targets(batched_inputs, images)
+            if self.weak_supervision:
+                targets = self.prepare_weaksup_targets(batched_inputs, images)
+            else:
+                targets = self.prepare_targets(batched_inputs, images)
 
             # bipartite matching-based loss
             losses = self.criterion(outputs, targets)
@@ -252,7 +280,8 @@ class VideoMaskFormer(nn.Module):
 
             return retry_if_cuda_oom(self.inference_video)(mask_cls_result, mask_pred_result, image_size, height, width)
 
-    def prepare_targets(self, targets, images):
+    def prepare_weaksup_targets(self, targets, images):
+        # targets: [vid1[frame1, frame2], vid2[frame1, frame2]]
         h_pad, w_pad = images.tensor.shape[-2:]
         start, stride = 2, 4  # TODO: adapt 'start' and 'stride' into config
         gt_instances = []
@@ -260,86 +289,71 @@ class VideoMaskFormer(nn.Module):
             _num_instance = len(targets_per_video["instances"][0])
             mask_shape = [_num_instance, self.num_frames, h_pad, w_pad]
 
-            # original Mask2Former under full supervision
-            if not self.weak_supervision:
-                gt_masks_per_video = torch.zeros(mask_shape, dtype=torch.bool, device=self.device)
+            # rectangle gt mask from boxes for mask projection loss
+            # TODO: add images_color_similarity for pairwise loss
+            box_mask_full_per_video = torch.zeros(mask_shape, device=self.device)  # (N, T, H, W)
+            box_mask_per_video = []
+            gt_ids_per_video = []
+            for f_i, targets_per_frame in enumerate(targets_per_video["instances"]):
+                targets_per_frame = targets_per_frame.to(self.device)
+                gt_ids_per_video.append(targets_per_frame.gt_ids[:, None])  # [(N, 1), (N, 1), ...]
 
-                gt_ids_per_video = []
-                for f_i, targets_per_frame in enumerate(targets_per_video["instances"]):
-                    targets_per_frame = targets_per_frame.to(self.device)
-                    h, w = targets_per_frame.image_size
+                # generate rectangle gt masks from boxes of shape (N, 4) in abs coordinates
+                gt_boxes = [gt_box.squeeze() for gt_box in targets_per_frame.gt_boxes.tensor.split(1)]
+                box_masks_full_per_frame = []
+                box_masks_per_frame = []
+                for ins_i, gt_box in enumerate(gt_boxes):
+                    box_mask_full = torch.zeros(mask_shape[2:], device=self.device)  # (h_pad, w_pad)
+                    box_mask_full[int(gt_box[1]):int(gt_box[3] + 1), int(gt_box[0]):int(gt_box[2] + 1)] = 1.0
+                    box_mask = box_mask_full[start::stride, start::stride]  # (h_pad/4, w_pad/4)
+                    box_masks_per_frame.append(box_mask)
 
-                    gt_ids_per_video.append(targets_per_frame.gt_ids[:, None])  # [(N, 1), (N, 1), ...]
-                    gt_masks_per_video[:, f_i, :h, :w] = targets_per_frame.gt_masks.tensor
+                # (N, h_pad/4, w_pad/4)->(N, 1, h_pad/4, w_pad/4)
+                box_mask_per_video.append(torch.stack(box_masks_per_frame, dim=0)[:, None, :, :])
 
-                gt_ids_per_video = torch.cat(gt_ids_per_video, dim=1)  # (N, num_frame)
-                valid_idx = (gt_ids_per_video != -1).any(dim=-1)
+            box_mask_per_video = torch.cat(box_mask_per_video, dim=1)  # (N, T, h_pad/4, w_pad/4)
+            gt_ids_per_video = torch.cat(gt_ids_per_video, dim=1)  # (N, num_frame)
+            valid_idx = (gt_ids_per_video != -1).any(dim=-1)
 
-                gt_classes_per_video = targets_per_frame.gt_classes[valid_idx]  # N,
-                gt_ids_per_video = gt_ids_per_video[valid_idx]  # N, num_frames
+            gt_classes_per_video = targets_per_frame.gt_classes[valid_idx]  # N,
+            gt_ids_per_video = gt_ids_per_video[valid_idx]  # N, num_frames
 
-                gt_instances.append({"labels": gt_classes_per_video, "ids": gt_ids_per_video})
-                gt_masks_per_video = gt_masks_per_video[valid_idx].float()  # N, num_frames, H, W
-                gt_instances[-1].update({"masks": gt_masks_per_video})
-            # box level weak supervision
-            else:
+            gt_instances.append(
+                {
+                    "labels": gt_classes_per_video, "ids": gt_ids_per_video,
+                    "box_masks": box_mask_per_video[valid_idx].float()
+                }
+            )
+        return gt_instances
 
-                # rectangle gt mask from boxes for mask projection loss
-                # TODO: add images_color_similarity for pairwise loss
-                box_mask_full_per_video = torch.zeros(mask_shape, device=self.device)  # (N, T, H, W)
-                box_mask_per_video = []
-                gt_boxes_per_video = []
+    def prepare_targets(self, targets, images):
+        # images:
+        h_pad, w_pad = images.tensor.shape[-2:]
+        start, stride = 2, 4  # TODO: adapt 'start' and 'stride' into config
+        gt_instances = []
+        for targets_per_video in targets:
+            _num_instance = len(targets_per_video["instances"][0])
+            mask_shape = [_num_instance, self.num_frames, h_pad, w_pad]
 
-                gt_ids_per_video = []
-                for f_i, targets_per_frame in enumerate(targets_per_video["instances"]):
-                    targets_per_frame = targets_per_frame.to(self.device)
+            gt_masks_per_video = torch.zeros(mask_shape, dtype=torch.bool, device=self.device)
 
-                    gt_ids_per_video.append(targets_per_frame.gt_ids[:, None])  # [(N, 1), (N, 1), ...]
+            gt_ids_per_video = []
+            for f_i, targets_per_frame in enumerate(targets_per_video["instances"]):
+                targets_per_frame = targets_per_frame.to(self.device)
+                h, w = targets_per_frame.image_size
 
-                    # generate rectangle gt masks from boxes(N, 4)
-                    gt_boxes = [
-                        gt_box.squeeze() for gt_box in targets_per_frame.gt_boxes.tensor.split(1)
-                    ]  # boxes of abs coordinates
-                    box_masks_full_per_frame = []
-                    box_masks_per_frame = []
-                    for ins_i, gt_box in enumerate(gt_boxes):
-                        box_mask_full = torch.zeros(mask_shape[2:], device=self.device)  # (h_pad, w_pad)
-                        box_mask_full[int(gt_box[1]):int(gt_box[3] + 1), int(gt_box[0]):int(gt_box[2] + 1)] = 1.0
-                        box_mask = box_mask_full[start::stride, start::stride]  # (h_pad/4, w_pad/4)
+                gt_ids_per_video.append(targets_per_frame.gt_ids[:, None])  # [(N, 1), (N, 1), ...]
+                gt_masks_per_video[:, f_i, :h, :w] = targets_per_frame.gt_masks.tensor
 
-                        box_masks_full_per_frame.append(box_mask_full)
-                        box_masks_per_frame.append(box_mask)
+            gt_ids_per_video = torch.cat(gt_ids_per_video, dim=1)  # (N, num_frame)
+            valid_idx = (gt_ids_per_video != -1).any(dim=-1)
 
-                    box_mask_full_per_video[:, f_i, :, :] = torch.stack(
-                        box_masks_full_per_frame,dim=0)  # (N, h_pad, w_pad)
+            gt_classes_per_video = targets_per_frame.gt_classes[valid_idx]  # N,
+            gt_ids_per_video = gt_ids_per_video[valid_idx]  # N, num_frames
 
-                    box_mask_per_video.append(
-                        torch.stack(box_masks_per_frame, dim=0)[:, None, :, :]
-                    )  # (N, h_pad/4, w_pad/4)->(N, 1, h_pad/4, w_pad/4)
-
-                    abs_boxes_per_frame = targets_per_frame.gt_boxes.tensor[:, None, :].to(torch.float)  # (N, 4)->(N, 1, 4)
-                    rel_boxes_per_frame = torch.zeros_like(abs_boxes_per_frame, dtype=torch.float, device=self.device)
-                    rel_boxes_per_frame[:, :, 0::2] = abs_boxes_per_frame[:, :, 0::2] / float(w_pad)
-                    rel_boxes_per_frame[:, :, 1::2] = abs_boxes_per_frame[:, :, 1::2] / float(h_pad)
-                    gt_boxes_per_video.append(rel_boxes_per_frame)
-
-                box_mask_per_video = torch.cat(box_mask_per_video, dim=1)  # (N, T, h_pad/4, w_pad/4)
-                gt_boxes_per_video = torch.cat(gt_boxes_per_video, dim=1)  # (N, T, 4)
-
-                gt_ids_per_video = torch.cat(gt_ids_per_video, dim=1)  # (N, num_frame)
-                valid_idx = (gt_ids_per_video != -1).any(dim=-1)
-
-                gt_classes_per_video = targets_per_frame.gt_classes[valid_idx]  # N,
-                gt_ids_per_video = gt_ids_per_video[valid_idx]  # N, num_frames
-
-                gt_instances.append(
-                    {
-                        "labels": gt_classes_per_video, "ids": gt_ids_per_video,
-                        "boxes": gt_boxes_per_video[valid_idx].float(),
-                        "box_masks_full": box_mask_full_per_video[valid_idx].float(),
-                        "box_masks": box_mask_per_video[valid_idx].float()
-                    }
-                )
+            gt_instances.append({"labels": gt_classes_per_video, "ids": gt_ids_per_video})
+            gt_masks_per_video = gt_masks_per_video[valid_idx].float()  # N, num_frames, H, W
+            gt_instances[-1].update({"masks": gt_masks_per_video})
         return gt_instances
 
     def inference_video(self, pred_cls, pred_masks, img_size, output_height, output_width):
