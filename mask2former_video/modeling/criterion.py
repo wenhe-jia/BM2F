@@ -205,7 +205,7 @@ class VideoSetCriterionProjMask(nn.Module):
         }
 
         del src_masks, src_masks_x, src_masks_y
-        del target_masks, target_box_masks_x, target_box_masks_y
+        del target_box_masks, target_box_masks_x, target_box_masks_y
         return losses
 
     def _get_src_permutation_idx(self, indices):
@@ -223,7 +223,7 @@ class VideoSetCriterionProjMask(nn.Module):
     def get_loss(self, loss, outputs, targets, indices, num_masks):
         loss_map = {
             'labels': self.loss_labels,
-            'weaksup_masks': self.loss_weaksup_masks,
+            'projection_masks': self.loss_projection_masks,
         }
         assert loss in loss_map, f"do you really want to compute {loss} loss?"
         return loss_map[loss](outputs, targets, indices, num_masks)

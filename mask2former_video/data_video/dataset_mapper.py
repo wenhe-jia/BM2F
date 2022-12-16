@@ -237,7 +237,7 @@ class YTVISDatasetMapper:
                 continue
 
             # NOTE copy() is to prevent annotations getting changed from applying augmentations
-            _frame_annos = []
+            _frame_annos = []  # single frame annotations
             for anno in video_annos[frame_idx]:
                 _anno = {}
                 for k, v in anno.items():
@@ -250,6 +250,7 @@ class YTVISDatasetMapper:
                 for obj in _frame_annos
                 if obj.get("iscrowd", 0) == 0
             ]
+            # 先为每个instance生成一个dummy obj
             sorted_annos = [_get_dummy_anno(self.num_classes) for _ in range(len(ids))]
 
             for _anno in annos:
@@ -263,8 +264,10 @@ class YTVISDatasetMapper:
                 instances.gt_boxes = instances.gt_masks.get_bounding_boxes()
                 instances = filter_empty_instances(instances)
             else:
-                instances.gt_masks = BitMasks(torch.empty((0, *image_shape)))
-                instances.gt_boxes = instances.gt_masks.get_bounding_boxes()
+                # 在选的两帧上都没有object，所有的sorted_annos, ids, _frame_annos都是空的
+                instances.gt_masks = BitMasks(torch.empty((0, *image_shape)))  # tensor([]), shape in (0, h, w)
+                instances.gt_boxes = instances.gt_masks.get_bounding_boxes()  # tensor([]), shape in (0, 4)
+
             dataset_dict["instances"].append(instances)
 
         return dataset_dict

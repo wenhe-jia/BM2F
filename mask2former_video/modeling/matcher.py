@@ -118,17 +118,12 @@ class VideoHungarianMatcherProjMask(nn.Module):
             # gt masks are already padded when preparing target
             tgt_box_mask = targets[b]["box_masks"].to(out_mask)  # [num_gts, T, H_pred, W_pred], 有可能有空的mask(dummy)
 
-
             with autocast(enabled=False):
                 cost_projection = calculate_axis_projection(out_mask, tgt_box_mask, 3) + \
                                   calculate_axis_projection(out_mask, tgt_box_mask, 2)
 
             # Final cost matrix
-            C = (
-                    self.cost_mask * cost_mask
-                    + self.cost_class * cost_class
-                    + self.cost_dice * cost_dice
-            )  # (num_query, num_gt)
+            C = (self.cost_class * cost_class + self.cost_projection * cost_projection)  # (num_query, num_gt)
             C = C.reshape(num_queries, -1).cpu()
 
             indices.append(linear_sum_assignment(C))  # [( query_idxs: ndarray(num_gt,), gt_idxs: ndarray(num_gt,))]
@@ -165,8 +160,7 @@ class VideoHungarianMatcherProjMask(nn.Module):
         head = "Matcher " + self.__class__.__name__
         body = [
             "cost_class: {}".format(self.cost_class),
-            "cost_mask: {}".format(self.cost_mask),
-            "cost_dice: {}".format(self.cost_dice),
+            "cost_projection: {}".format(self.cost_projection),
         ]
         lines = [head] + [" " * _repr_indent + line for line in body]
         return "\n".join(lines)
@@ -218,11 +212,12 @@ class VideoHungarianMatcher(nn.Module):
             out_mask = outputs["pred_masks"][b]  # [num_queries, T, H_pred, W_pred]
             # gt masks are already padded when preparing target
             tgt_mask = targets[b]["masks"].to(out_mask)  # [num_gts, T, H_pred, W_pred], 有可能有空的mask(dummy)
-
+            # if tgt_mask.shape[0] == 0:
+            #     raise Exception("no target!!")
             # out_mask = out_mask[:, None]
             # tgt_mask = tgt_mask[:, None]
             # all masks share the same set of points for efficient matching!
-            point_coords = torch.rand(1, self.num_points, 2, device=out_mask.device)  # (1, num_points, 2)
+            point_coords = torch.rand(1, self.num_points, 2, device=out_mask.device).to(out_mask)  # (1, num_points, 2)
             # get gt labels
             tgt_mask = point_sample(
                 tgt_mask,

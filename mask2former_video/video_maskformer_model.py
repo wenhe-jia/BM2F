@@ -289,30 +289,37 @@ class VideoMaskFormer(nn.Module):
             _num_instance = len(targets_per_video["instances"][0])
             mask_shape = [_num_instance, self.num_frames, h_pad, w_pad]
 
+            gt_box_masks_full_per_video = torch.zeros(mask_shape, dtype=torch.float32, device=self.device)
+
             # rectangle gt mask from boxes for mask projection loss
             # TODO: add images_color_similarity for pairwise loss
             box_mask_per_video = []
             gt_ids_per_video = []
             for f_i, targets_per_frame in enumerate(targets_per_video["instances"]):
                 targets_per_frame = targets_per_frame.to(self.device)
-                gt_ids_per_video.append(targets_per_frame.gt_ids[:, None])  # [(N, 1), (N, 1), ...]
+                gt_ids_per_video.append(targets_per_frame.gt_ids[:, None])  # [(num_ins, 1), (num_ins, 1)]
 
                 # generate rectangle gt masks from boxes of shape (N, 4) in abs coordinates
-                gt_boxes = [gt_box.squeeze() for gt_box in targets_per_frame.gt_boxes.tensor.split(1)]
-                box_masks_full_per_frame = []
-                box_masks_per_frame = []
-                for ins_i, gt_box in enumerate(gt_boxes):
-                    box_mask_full = torch.zeros(mask_shape[2:], device=self.device)  # (h_pad, w_pad)
-                    box_mask_full[int(gt_box[1]):int(gt_box[3] + 1), int(gt_box[0]):int(gt_box[2] + 1)] = 1.0
-                    box_mask = box_mask_full[start::stride, start::stride]  # (h_pad/4, w_pad/4)
-                    box_masks_per_frame.append(box_mask)
+                if len(targets_per_frame) > 0:
+                    gt_boxes = [gt_box.squeeze() for gt_box in targets_per_frame.gt_boxes.tensor.split(1)]
+                    box_masks_full_per_frame = []
+                    box_masks_per_frame = []
+                    for ins_i, gt_box in enumerate(gt_boxes):
+                        gt_box_masks_full_per_video[
+                            ins_i, f_i, int(gt_box[1]):int(gt_box[3] + 1), int(gt_box[0]):int(gt_box[2] + 1)
+                        ] = 1.0
+
+                    # box_mask_full = torch.zeros(mask_shape[2:], device=self.device)  # (h_pad, w_pad)
+                    # box_mask_full[int(gt_box[1]):int(gt_box[3] + 1), int(gt_box[0]):int(gt_box[2] + 1)] = 1.0
+                    # box_mask = box_mask_full[start::stride, start::stride]  # (h_pad/4, w_pad/4)
+                    # box_masks_per_frame.append(box_mask)
 
                 # (N, h_pad/4, w_pad/4)->(N, 1, h_pad/4, w_pad/4)
-                box_mask_per_video.append(torch.stack(box_masks_per_frame, dim=0)[:, None, :, :])
+                # box_mask_per_video.append(torch.stack(box_masks_per_frame, dim=0)[:, None, :, :])
 
-            box_mask_per_video = torch.cat(box_mask_per_video, dim=1)  # (N, T, h_pad/4, w_pad/4)
+            gt_box_masks_per_video = gt_box_masks_full_per_video[:, :, start::stride, start::stride]  # (num_ins, T, h_pad/4, w_pad/4)
             gt_ids_per_video = torch.cat(gt_ids_per_video, dim=1)  # (N, num_frame)
-            valid_idx = (gt_ids_per_video != -1).any(dim=-1)
+            valid_idx = (gt_ids_per_video != -1).any(dim=-1)  # (num_ins,), 别取到再所有帧上都是空的gt
 
             gt_classes_per_video = targets_per_frame.gt_classes[valid_idx]  # N,
             gt_ids_per_video = gt_ids_per_video[valid_idx]  # N, num_frames
@@ -320,7 +327,7 @@ class VideoMaskFormer(nn.Module):
             gt_instances.append(
                 {
                     "labels": gt_classes_per_video, "ids": gt_ids_per_video,
-                    "box_masks": box_mask_per_video[valid_idx].float()
+                    "box_masks": gt_box_masks_per_video[valid_idx].float()
                 }
             )
         return gt_instances
@@ -328,7 +335,6 @@ class VideoMaskFormer(nn.Module):
     def prepare_targets(self, targets, images):
         # images:
         h_pad, w_pad = images.tensor.shape[-2:]
-        start, stride = 2, 4  # TODO: adapt 'start' and 'stride' into config
         gt_instances = []
         for targets_per_video in targets:
             _num_instance = len(targets_per_video["instances"][0])
