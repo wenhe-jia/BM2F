@@ -69,10 +69,21 @@ batch_sigmoid_ce_loss_jit = torch.jit.script(
 
 
 def calculate_axis_projection(out_mask, tgt_box_mask, axis):
+    """
+
+    :param out_mask: (N, T, H, W)
+    :param tgt_box_mask: (N, T, H, W)
+    :param axis: axis to project
+    :return:
+    """
     with autocast(enabled=False):
         src_mask_axis = out_mask.max(dim=axis, keepdim=True)[0].flatten(1, 3).float()
         tgt_box_mask_axis = tgt_box_mask.max(dim=axis, keepdim=True)[0].flatten(1, 3).float()
+
+        # src_mask_axis_topk = out_mask.topk(3, dim=axis, sorted=False)[0].flatten(1, 3).float()
+        # tgt_box_mask_axis_topk = tgt_box_mask.topk(3, dim=axis, sorted=False)[0].flatten(1, 3).float()
     return batch_dice_loss_jit(src_mask_axis, tgt_box_mask_axis)
+    # return batch_dice_loss_jit(src_mask_axis_topk, tgt_box_mask_axis_topk)
 
 
 class VideoHungarianMatcherProjMask(nn.Module):
@@ -118,9 +129,13 @@ class VideoHungarianMatcherProjMask(nn.Module):
             # gt masks are already padded when preparing target
             tgt_box_mask = targets[b]["box_masks"].to(out_mask)  # [num_gts, T, H_pred, W_pred], 有可能有空的mask(dummy)
 
-            with autocast(enabled=False):
-                cost_projection = calculate_axis_projection(out_mask, tgt_box_mask, 3) + \
-                                  calculate_axis_projection(out_mask, tgt_box_mask, 2)
+            if tgt_ids.shape[0] > 0:
+                with autocast(enabled=False):
+                    cost_projection = calculate_axis_projection(out_mask, tgt_box_mask, 3) + \
+                                      calculate_axis_projection(out_mask, tgt_box_mask, 2)
+                                      # calculate_axis_projection(out_mask, tgt_box_mask, 1)
+            else:
+                cost_projection = torch.zeros((100, 0), dtype=torch.float32, device=out_prob.device)
 
             # Final cost matrix
             C = (self.cost_class * cost_class + self.cost_projection * cost_projection)  # (num_query, num_gt)
@@ -212,8 +227,7 @@ class VideoHungarianMatcher(nn.Module):
             out_mask = outputs["pred_masks"][b]  # [num_queries, T, H_pred, W_pred]
             # gt masks are already padded when preparing target
             tgt_mask = targets[b]["masks"].to(out_mask)  # [num_gts, T, H_pred, W_pred], 有可能有空的mask(dummy)
-            # if tgt_mask.shape[0] == 0:
-            #     raise Exception("no target!!")
+
             # out_mask = out_mask[:, None]
             # tgt_mask = tgt_mask[:, None]
             # all masks share the same set of points for efficient matching!

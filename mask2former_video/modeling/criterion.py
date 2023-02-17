@@ -71,7 +71,53 @@ sigmoid_ce_loss_jit = torch.jit.script(
 )  # type: torch.jit.ScriptModule
 
 
-def projection_dice_loss(
+def projection3D_dice_loss(
+        inputs_x: torch.Tensor,
+        targets_x: torch.Tensor,
+        inputs_y: torch.Tensor,
+        targets_y: torch.Tensor,
+        inputs_t: torch.Tensor,
+        targets_t: torch.Tensor,
+        num_masks: float,
+    ):
+    """
+    :param inputs_x: (num_ins, T*H_pad/4)
+    :param targets_x: (num_ins, T*H_pad/4)
+    :param inputs_y: (num_ins, T*W_pad/4)
+    :param targets_y: (num_ins, T*W_pad/4)
+    :param inputs_y: (num_ins, H_pad/4 * W_pad/4)
+    :param targets_y: (num_ins, H_pad/4 * W_pad/4)
+    :param num_masks: int
+    :return: loss: float tensor
+    """
+    assert inputs_x.shape[0] == targets_x.shape[0]
+    assert inputs_y.shape[0] == targets_y.shape[0]
+    assert inputs_t.shape[0] == targets_t.shape[0]
+    eps = 1e-5
+
+    # calaulate x axis projection loss
+    intersection_x = (inputs_x * targets_x).sum(dim=1)  # (num_ins*T,)
+    union_x = (inputs_x ** 2.0).sum(dim=1) + (targets_x ** 2.0).sum(dim=1) + eps  # (num_ins*T,)
+    loss_x = 1. - (2 * intersection_x / union_x)  # (num_ins*T,)
+
+    # calaulate y axis projection loss
+    intersection_y = (inputs_y * targets_y).sum(dim=1)  # (num_ins*T,)
+    union_y = (inputs_y ** 2.0).sum(dim=1) + (targets_y ** 2.0).sum(dim=1) + eps  # (num_ins*T,)
+    loss_y = 1. - (2 * intersection_y / union_y)  # (num_ins*T,)
+
+    # # calaulate t axis projection loss
+    intersection_t = (inputs_t * targets_t).sum(dim=1)  # (num_ins*T,)
+    union_t = (inputs_t ** 2.0).sum(dim=1) + (targets_t ** 2.0).sum(dim=1) + eps  # (num_ins*T,)
+    loss_t = 1. - (2 * intersection_t / union_t)  # (num_ins*T,)
+
+    return (loss_x + loss_y + loss_t).sum() / num_masks
+
+
+projection3D_dice_loss_jit = torch.jit.script(
+    projection3D_dice_loss
+)  # type: torch.jit.ScriptModule
+
+def projection2D_dice_loss(
         inputs_x: torch.Tensor,
         targets_x: torch.Tensor,
         inputs_y: torch.Tensor,
@@ -79,10 +125,10 @@ def projection_dice_loss(
         num_masks: float,
     ):
     """
-    :param inputs_x: (num_ins*T, H_pad/4)
-    :param targets_x: (num_ins*T, H_pad/4)
-    :param inputs_y: (num_ins*T, W_pad/4)
-    :param targets_y: (num_ins*T, W_pad/4)
+    :param inputs_x: (num_ins, T*H_pad/4)
+    :param targets_x: (num_ins, T*H_pad/4)
+    :param inputs_y: (num_ins, T*W_pad/4)
+    :param targets_y: (num_ins, T*W_pad/4)
     :param num_masks: int
     :return: loss: float tensor
     """
@@ -103,8 +149,8 @@ def projection_dice_loss(
     return (loss_x + loss_y).sum() / num_masks
 
 
-projection_dice_loss_jit = torch.jit.script(
-    projection_dice_loss
+projection2D_dice_loss_jit = torch.jit.script(
+    projection2D_dice_loss
 )  # type: torch.jit.ScriptModule
 
 
@@ -188,24 +234,46 @@ class VideoSetCriterionProjMask(nn.Module):
         src_masks = src_masks.flatten(0, 1)[:, None]
         target_box_masks = target_box_masks.flatten(0, 1)[:, None]
 
-        # project mask to x & y axis
-        # masks_x: (num_ins*T, H_pad/4)
-        # masks_y: (num_ins*T, W_pad/4)
-        src_masks_x = src_masks.max(dim=3, keepdim=True)[0].flatten(1, 3)
-        src_masks_y = src_masks.max(dim=2, keepdim=True)[0].flatten(1, 3)
+        if src_idx[0].shape[0] > 0:
+            # project mask to x & y axis
+            # masks_x: (num_ins, T, H_pad/4, W_pad/4)->(num_ins, T, H_pad, 1)->(num_ins, T*H_pad)
+            # masks_y: (num_ins, T, H_pad/4, W_pad/4)->(num_ins, T, 1, W_pad)->(num_ins, T*W_pad)
 
-        with torch.no_grad():
-            target_box_masks_x = target_box_masks.max(dim=3, keepdim=True)[0].flatten(1, 3)
-            target_box_masks_y = target_box_masks.max(dim=2, keepdim=True)[0].flatten(1, 3)
+            # max projection
+            src_masks_x = src_masks.max(dim=3, keepdim=True)[0].flatten(1, 3)
+            src_masks_y = src_masks.max(dim=2, keepdim=True)[0].flatten(1, 3)
+            # src_masks_t = src_masks.max(dim=1, keepdim=True)[0].flatten(1, 3)
 
-        losses = {
-            "loss_mask_projection": projection_dice_loss_jit(
-                src_masks_x, target_box_masks_x, src_masks_y, target_box_masks_y, num_masks
-            )
-        }
+            # topk projection
+            # src_masks_x = src_masks.topk(3, dim=3, sorted=False)[0].flatten(1, 3)
+            # src_masks_y = src_masks.topk(3, dim=2, sorted=False)[0].flatten(1, 3)
 
-        del src_masks, src_masks_x, src_masks_y
-        del target_box_masks, target_box_masks_x, target_box_masks_y
+
+            with torch.no_grad():
+                # max projection
+                target_box_masks_x = target_box_masks.max(dim=3, keepdim=True)[0].flatten(1, 3)
+                target_box_masks_y = target_box_masks.max(dim=2, keepdim=True)[0].flatten(1, 3)
+                # target_box_masks_t = target_box_masks.max(dim=1, keepdim=True)[0].flatten(1, 3)
+
+                # topk projection
+                # target_box_masks_x = target_box_masks.topk(3, dim=3, sorted=False)[0].flatten(1, 3)
+                # target_box_masks_y = target_box_masks.topk(3, dim=2, sorted=False)[0].flatten(1, 3)
+
+            losses = {
+                "loss_mask_projection": projection2D_dice_loss_jit(
+                    src_masks_x, target_box_masks_x,
+                    src_masks_y, target_box_masks_y,
+                    # src_masks_t, target_box_masks_t,
+                    num_masks
+                )
+            }
+            del src_masks_x, src_masks_y
+            del target_box_masks_x, target_box_masks_y
+        else:
+            losses = {"loss_mask_projection": torch.tensor([0], dtype=torch.float32, device=src_masks.device)}
+
+        del src_masks
+        del target_box_masks
         return losses
 
     def _get_src_permutation_idx(self, indices):

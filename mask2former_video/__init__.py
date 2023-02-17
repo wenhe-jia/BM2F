@@ -15,3 +15,6 @@ from .data_video import (
     build_detection_test_loader,
     get_detection_dataset_dicts,
 )
+
+# utils
+from .utils.wandb_writer import WandBWriter

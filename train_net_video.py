@@ -51,6 +51,7 @@ from mask2former_video import (
     build_detection_train_loader,
     build_detection_test_loader,
     get_detection_dataset_dicts,
+    WandBWriter,
 )
 
 
@@ -236,6 +237,12 @@ class Trainer(DefaultTrainer):
         if len(results) == 1:
             results = list(results.values())[0]
         return results
+
+    def build_writers(self):
+        default_writers = super(Trainer, self).build_writers()
+        if self.cfg.WANDB.ENABLED:
+            default_writers.append(WandBWriter(self.cfg))
+        return default_writers
 
 
 def setup(args):
