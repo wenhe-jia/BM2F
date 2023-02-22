@@ -5,10 +5,12 @@ MODEL:
     WEAK_SUPERVISION:
       ENABLED: True
       MATCHER_TYPE: "projection_mask"
-      MASK_TARGET_TYPE: "projection_mask"
+      MASK_TARGET_TYPE: "projection_mask_fgbg"
       MASK_PROJECTION_WEIGHT: 5.0
 SOLVER:
   IMS_PER_BATCH: 8
   BASE_LR: 0.00005  # 0.0001
   STEPS: (11000,)
   MAX_ITER: 16000
+TEST:
+  EVAL_PERIOD: 8000

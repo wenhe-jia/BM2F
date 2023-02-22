@@ -14,9 +14,13 @@ from detectron2.modeling.backbone import Backbone
 from detectron2.modeling.postprocessing import sem_seg_postprocess
 from detectron2.structures import Boxes, ImageList, Instances, BitMasks
 
-from .modeling.criterion import VideoSetCriterion, VideoSetCriterionProjMask
-from .modeling.matcher import VideoHungarianMatcher, VideoHungarianMatcherProjMask
+from .modeling.criterion import VideoSetCriterionProjMask
+from .modeling.matcher import VideoHungarianMatcherProjMask
 from .utils.memory import retry_if_cuda_oom
+
+import os, cv2
+import numpy as np
+
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +49,7 @@ class VideoMaskFormer(nn.Module):
         pixel_std: Tuple[float],
         # video
         num_frames,
+        output_dir,
     ):
         """
         Args:
@@ -91,6 +96,8 @@ class VideoMaskFormer(nn.Module):
         self.weak_supervision = weak_supervision
         self.mask_out_stride = 4
 
+        self.output_dir = output_dir
+
     @classmethod
     def from_config(cls, cfg):
         backbone = build_backbone(cfg)
@@ -113,10 +120,16 @@ class VideoMaskFormer(nn.Module):
                     "loss_mask": cfg.MODEL.MASK_FORMER.MASK_WEIGHT,
                     "loss_dice": cfg.MODEL.MASK_FORMER.DICE_WEIGHT
                 }
-            if mask_target_type == "projection_mask":
+            elif mask_target_type == "projection_mask":
                 weight_dict = {
                     "loss_ce": cfg.MODEL.MASK_FORMER.CLASS_WEIGHT,
                     "loss_mask_projection": cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_PROJECTION_WEIGHT
+                }
+            elif mask_target_type == "projection_mask_fgbg":
+                weight_dict = {
+                    "loss_ce": cfg.MODEL.MASK_FORMER.CLASS_WEIGHT,
+                    "loss_mask_projection_fg": cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_PROJECTION_WEIGHT,
+                    "loss_mask_projection_bg": cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_PROJECTION_WEIGHT
                 }
             elif mask_target_type == "projection_and_pairwise":
                 raise Exception("Unsupported yet!!!")
@@ -157,7 +170,7 @@ class VideoMaskFormer(nn.Module):
 
         # build criterion
         if weak_supervision:
-            if mask_target_type == "projection_mask":
+            if mask_target_type == "projection_mask" or "projection_mask_fgbg":
                 losses = ["labels", "projection_masks"]
                 criterion = VideoSetCriterionProjMask(
                     sem_seg_head.num_classes,
@@ -169,7 +182,7 @@ class VideoMaskFormer(nn.Module):
             elif mask_target_type == "projection_and_pairwise":
                 raise Exception("Unsupported yet!!!")
             else:
-                raise Exception("Unknown mask_target_type type !!!")
+                raise Exception("Unknown mask_target_type!!!")
         else:
             losses = ["labels", "masks"]
             criterion = VideoSetCriterion(
@@ -198,6 +211,7 @@ class VideoMaskFormer(nn.Module):
             "pixel_std": cfg.MODEL.PIXEL_STD,
             # video
             "num_frames": cfg.INPUT.SAMPLING_FRAME_NUM,
+            "output_dir": cfg.OUTPUT_DIR
         }
 
     @property
@@ -230,6 +244,18 @@ class VideoMaskFormer(nn.Module):
                     segments_info (list[dict]): Describe each segment in `panoptic_seg`.
                         Each dict contains keys "id", "category_id", "isthing".
         """
+        if not self.training:
+            print('\n--- video: {} | name: {} | length: {}--- \n'.format(
+                    batched_inputs[0]['video_id'],
+                    batched_inputs[0]['file_names'][0].split('/')[-2],
+                    len(batched_inputs[0]['file_names'])
+                )
+            )
+
+            vid_path = '/home/user/Program/jwh/Weakly-Sup-VIS/' + self.output_dir + '/vis/vid_' + \
+                       batched_inputs[0]['file_names'][0].split('/')[-2] + '/'
+            os.makedirs(vid_path, exist_ok=True)
+
         images = []
         for video in batched_inputs:
             for frame in video["image"]:
@@ -278,7 +304,7 @@ class VideoMaskFormer(nn.Module):
             height = input_per_image.get("height", image_size[0])  # raw image size before data augmentation
             width = input_per_image.get("width", image_size[1])
 
-            return retry_if_cuda_oom(self.inference_video)(mask_cls_result, mask_pred_result, image_size, height, width)
+            return retry_if_cuda_oom(self.inference_video)(mask_cls_result, mask_pred_result, image_size, height, width, vid_path)
 
     def prepare_weaksup_targets(self, targets, images):
         # targets: [vid1[frame1, frame2], vid2[frame1, frame2]]
@@ -361,7 +387,7 @@ class VideoMaskFormer(nn.Module):
             gt_instances[-1].update({"masks": gt_masks_per_video})
         return gt_instances
 
-    def inference_video(self, pred_cls, pred_masks, img_size, output_height, output_width):
+    def inference_video(self, pred_cls, pred_masks, img_size, output_height, output_width, vid_path):
         if len(pred_cls) > 0:
             scores = F.softmax(pred_cls, dim=-1)[:, :-1]
             labels = torch.arange(self.sem_seg_head.num_classes, device=self.device).unsqueeze(0).repeat(self.num_queries, 1).flatten(0, 1)
@@ -378,9 +404,20 @@ class VideoMaskFormer(nn.Module):
 
             masks = pred_masks > 0.
 
-            out_scores = scores_per_image.tolist()
-            out_labels = labels_per_image.tolist()
-            out_masks = [m for m in masks.cpu()]
+            out_scores = scores_per_image.tolist()  # [score] * topk
+            out_labels = labels_per_image.tolist()  # [category] * topk
+            out_masks = [m for m in masks.cpu()]  # [(T, H, W)] * topk
+
+            for i in range(len(out_scores)):
+                score = out_scores[i]
+                label = out_labels[i]
+                seq_masks = out_masks[i]
+
+                pred_path = vid_path + 'pred_' + str(i) + '_score_' + str(score)[:4] + '/'
+                os.makedirs(pred_path, exist_ok=True)
+                for t in range(seq_masks.shape[0]):
+                    mask_frame = seq_masks[t, :, :].to(dtype=torch.uint8).numpy() * 255
+                    cv2.imwrite(pred_path + 'frame_' + str(t) + '.png', mask_frame)
         else:
             out_scores = []
             out_labels = []
