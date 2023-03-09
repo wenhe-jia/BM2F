@@ -23,7 +23,7 @@ def batch_dice_loss(inputs: torch.Tensor, targets: torch.Tensor):
                  classification label for each element in inputs
                 (0 for the negative class and 1 for the positive class).
     """
-    inputs = inputs.sigmoid()
+    # inputs = inputs.sigmoid()
     inputs = inputs.flatten(1)
     numerator = 2 * torch.einsum("nc,mc->nm", inputs, targets)
     denominator = inputs.sum(-1)[:, None] + targets.sum(-1)[None, :]
@@ -43,13 +43,11 @@ def calculate_axis_projection(out_mask, tgt_box_mask, axis):
     :param axis: axis to project
     :return:
     """
+    out_mask = out_mask.sigmoid()
     src_mask_axis = out_mask.max(dim=axis, keepdim=True)[0].flatten(1, 3).float()  # (N, T*(H or W))
     tgt_box_mask_axis = tgt_box_mask.max(dim=axis, keepdim=True)[0].flatten(1, 3).float()  # (N, T*(H or W))
 
-    # src_mask_axis_topk = out_mask.topk(3, dim=axis, sorted=False)[0].flatten(1, 3).float()
-    # tgt_box_mask_axis_topk = tgt_box_mask.topk(3, dim=axis, sorted=False)[0].flatten(1, 3).float()
     return batch_dice_loss_jit(src_mask_axis, tgt_box_mask_axis)
-    # return batch_dice_loss_jit(src_mask_axis_topk, tgt_box_mask_axis_topk)
 
 
 def batch_sigmoid_ce_loss(inputs: torch.Tensor, targets: torch.Tensor):
@@ -120,62 +118,46 @@ def batch_projection_dice(inputs: torch.Tensor, inputs_MaskedByTgts: torch.Tenso
     return loss
 
 
-def calculate_fg_projection_dice(out_masks, tgt_box_masks, axis):
-    """
-    calculate fg box projection cost
-    :param out_masks: (N, T, H, W)
-    :param tgt_box_masks: (M, T, H, W)
-    :param axis
-    :return: projection dice cost matrix of shape: (N, M)
-    """
-    out_masks = out_masks.sigmoid()
-
-    out_masks_MaskedByTgts = []
-    for src_ind in range(out_masks.shape[0]):
-        out_IdvMask = out_masks[src_ind][None, :]
-        out_IdvMask_MaskedByTgts = out_IdvMask * tgt_box_masks  # (M, T, H, W)
-        out_masks_MaskedByTgts.append(out_IdvMask_MaskedByTgts)
-    out_masks_MaskedByTgts = torch.stack(out_masks_MaskedByTgts, dim=0)  # (N, M, T, H, W)
-
-    # (Q, G, T, H, W) -> (Q, G, T, (1/H), (1/W)) -> (Q, G, T*(W/H))
-    out_masks_MaskedByTgts_axis = out_masks_MaskedByTgts.max(dim=axis+1, keepdim=True)[0].flatten(2, 4).float()
-
-    # (Q, T, H, W) -> (Q, T, (1/H), (1/W)) -> (Q, T*(W/H)))
-    out_masks_axis = out_masks.max(dim=axis, keepdim=True)[0].flatten(1, 3).float()
-    tgt_box_masks_axis = tgt_box_masks.max(dim=axis, keepdim=True)[0].flatten(1, 3).float()
-
-    cost_fg_proj = batch_fg_projection_dice(out_masks_axis, out_masks_MaskedByTgts_axis, tgt_box_masks_axis)
-    return cost_fg_proj
-
-
 def calculate_projection_dice(out_masks, tgt_box_masks, axis, bg_projection):
     """
     calculate fg box projection cost
-    :param out_masks: (N, T, H, W)
-    :param tgt_box_masks: (M, T, H, W)
+    :param out_masks: (Q, T, H, W)
+    :param tgt_box_masks: (G, T, H, W)
     :param axis: int, axis to perform projection
     :param type: perform on foreground/background
-    :return: projection dice cost matrix of shape: (N, M)
+    :return: projection dice cost matrix of shape: (Q, G)
     """
     out_masks = out_masks.sigmoid()
 
-    if bg_projection:
-        out_masks = 1. - out_masks  # invert p to (1-p) as negative possibility
-        tgt_box_masks = 1. - tgt_box_masks  # invert fg/bg label
+    if not bg_projection:  # fg projection
+        out_masks_MaskedByTgts = []
+        for src_ind in range(out_masks.shape[0]):
+            out_IdvMask = out_masks[src_ind][None, :]  # (T, H, W) -> (1, T, H, W)
+            # (1, T, H, W) * (G, T, H, W) --broadcast-> ((G, T, H, W))
+            out_IdvMask_MaskedByTgts = out_IdvMask * tgt_box_masks
+            out_masks_MaskedByTgts.append(out_IdvMask_MaskedByTgts)
+        out_masks_MaskedByTgts = torch.stack(out_masks_MaskedByTgts, dim=0)  # (Q, G, T, H, W)
 
-    out_masks_MaskedByTgts = []
-    for src_ind in range(out_masks.shape[0]):
-        out_IdvMask = out_masks[src_ind][None, :]
-        out_IdvMask_MaskedByTgts = out_IdvMask * tgt_box_masks  # (M, T, H, W)
-        out_masks_MaskedByTgts.append(out_IdvMask_MaskedByTgts)
-    out_masks_MaskedByTgts = torch.stack(out_masks_MaskedByTgts, dim=0)  # (N, M, T, H, W)
+        # (Q, G, T, H, W) -> (Q, G, T, (1/H), (1/W)) -> (Q, G, T*(W/H))
+        out_masks_MaskedByTgts_axis = out_masks_MaskedByTgts.max(dim=axis + 1, keepdim=True)[0].flatten(2, 4).float()
+        # (Q, T, H, W) -> (Q, T, (1/H), (1/W)) -> (Q, T*(W/H)))
+        out_masks_axis = out_masks.max(dim=axis, keepdim=True)[0].flatten(1, 3).float()
+        tgt_box_masks_axis = tgt_box_masks.max(dim=axis, keepdim=True)[0].flatten(1, 3).float()
 
-    # (Q, G, T, H, W) -> (Q, G, T, (1/H), (1/W)) -> (Q, G, T*(W/H))
-    out_masks_MaskedByTgts_axis = out_masks_MaskedByTgts.max(dim=axis + 1, keepdim=True)[0].flatten(2, 4).float()
+    else:  # bg projection
+        out_masks_MaskedByTgts = []
+        for src_ind in range(out_masks.shape[0]):
+            out_IdvMask = out_masks[src_ind][None, :]  # (T, H, W) -> (1, T, H, W)
+            # (1, T, H, W) * (G, T, H, W) --broadcast-> ((G, T, H, W))
+            out_IdvMask_MaskedByTgts = ((1. - out_IdvMask) * (1. - tgt_box_masks)) + tgt_box_masks
+            out_masks_MaskedByTgts.append(out_IdvMask_MaskedByTgts)
+        out_masks_MaskedByTgts = torch.stack(out_masks_MaskedByTgts, dim=0)  # (Q, G, T, H, W)
 
-    # (Q, T, H, W) -> (Q, T, (1/H), (1/W)) -> (Q, T*(W/H)))
-    out_masks_axis = out_masks.max(dim=axis, keepdim=True)[0].flatten(1, 3).float()
-    tgt_box_masks_axis = tgt_box_masks.max(dim=axis, keepdim=True)[0].flatten(1, 3).float()
+        # (Q, G, T, H, W) -> (Q, G, T, (1/H), (1/W)) -> (Q, G, T*(W/H))
+        out_masks_MaskedByTgts_axis = out_masks_MaskedByTgts.min(dim=axis + 1, keepdim=True)[0].flatten(2, 4).float()
+        # (Q, T, H, W) -> (Q, T, (1/H), (1/W)) -> (Q, T*(W/H)))
+        out_masks_axis = (1. - out_masks).min(dim=axis, keepdim=True)[0].flatten(1, 3).float()
+        tgt_box_masks_axis = (1. - tgt_box_masks).max(dim=axis, keepdim=True)[0].flatten(1, 3).float()
 
     cost_proj = batch_projection_dice(out_masks_axis, out_masks_MaskedByTgts_axis, tgt_box_masks_axis)
     return cost_proj
@@ -229,7 +211,6 @@ class VideoHungarianMatcherProjMask(nn.Module):
                     # original projection
                     # cost_projection = calculate_axis_projection(out_mask, tgt_box_mask, 3) + \
                     #                   calculate_axis_projection(out_mask, tgt_box_mask, 2)
-                                      # calculate_axis_projection(out_mask, tgt_box_mask, 1)
 
                     # fg/bg projection
                     cost_projection = calculate_projection_dice(out_mask, tgt_box_mask, 3, False) + \

@@ -14,8 +14,12 @@ from detectron2.projects.point_rend.point_features import (
     get_uncertain_point_coords_with_randomness,
     point_sample,
 )
+from detectron2.structures.masks import BitMasks
 
 from mask2former.utils.misc import is_dist_avail_and_initialized
+
+import os, cv2
+import numpy as np
 
 
 def dice_loss(
@@ -229,73 +233,250 @@ class VideoSetCriterionProjMask(nn.Module):
         # src_masks: (N, T, H_pad/4, W_pad/4)
         # target_masks: (N, T, H_pad/4, W_pad/4)
 
-        # No need to upsample predictions as we are using normalized coordinates :)
         # (N, T, H_pad/4, W_pad/4)->(NT, 1, H_pad/4, W_pad/4)
         src_masks = src_masks.flatten(0, 1)[:, None]
         target_box_masks = target_box_masks.flatten(0, 1)[:, None]
 
-        src_masks_bg = 1. - src_masks
-
         if src_idx[0].shape[0] > 0:
-            src_masks_box_fg = src_masks * target_box_masks
-            src_masks_box_bg = src_masks_bg * (1. - target_box_masks)
-
+            """
+            bellow is for original projection loss
+            """
             # project mask to x & y axis
             # masks_x: (num_ins, T, H_pad/4, W_pad/4)->(num_ins, T, H_pad, 1)->(num_ins, T*H_pad)
             # masks_y: (num_ins, T, H_pad/4, W_pad/4)->(num_ins, T, 1, W_pad)->(num_ins, T*W_pad)
             # max projection
-            src_masks_x_fg = src_masks_box_fg.max(dim=3, keepdim=True)[0].flatten(1, 3)
-            src_masks_y_fg = src_masks_box_fg.max(dim=2, keepdim=True)[0].flatten(1, 3)
-            src_masks_x_bg = src_masks_box_bg.max(dim=3, keepdim=True)[0].flatten(1, 3)
-            src_masks_y_bg = src_masks_box_bg.max(dim=2, keepdim=True)[0].flatten(1, 3)
 
-            # src_masks_t = src_masks.max(dim=1, keepdim=True)[0].flatten(1, 3)
+            # src_masks_x = src_masks.max(dim=3, keepdim=True)[0].flatten(1, 3)
+            # src_masks_y = src_masks.max(dim=2, keepdim=True)[0].flatten(1, 3)
+            #
+            # with torch.no_grad():
+            #     # max projection
+            #     target_box_masks_x = target_box_masks.max(dim=3, keepdim=True)[0].flatten(1, 3)
+            #     target_box_masks_y = target_box_masks.max(dim=2, keepdim=True)[0].flatten(1, 3)
+            #
+            # losses = {
+            #     "loss_mask_projection": projection2D_dice_loss_jit(
+            #         src_masks_x, target_box_masks_x,
+            #         src_masks_y, target_box_masks_y,
+            #         num_masks
+            #     )
+            # }
+            #
+            # del src_masks_x, src_masks_y
+            # del target_box_masks_x, target_box_masks_y
 
-            # topk projection
-            # src_masks_x = src_masks.topk(3, dim=3, sorted=False)[0].flatten(1, 3)
-            # src_masks_y = src_masks.topk(3, dim=2, sorted=False)[0].flatten(1, 3)
+            """
+            bellow is for foreground / background separate loss
+            """
+            # src_masks_box_fg = src_masks * target_box_masks
+            # src_masks_box_bg = ((1. - src_masks) * (1. - target_box_masks)) + target_box_masks
+            #
+            # src_masks_x_fg = src_masks_box_fg.max(dim=3, keepdim=True)[0].flatten(1, 3)
+            # src_masks_y_fg = src_masks_box_fg.max(dim=2, keepdim=True)[0].flatten(1, 3)
+            # src_masks_x_bg = src_masks_box_bg.min(dim=3, keepdim=True)[0].flatten(1, 3)
+            # src_masks_y_bg = src_masks_box_bg.min(dim=2, keepdim=True)[0].flatten(1, 3)
+            #
+            # # # (NT, 1, H, 1) or (NT, 1, 1, W)
+            # # src_masks_x_fg, src_y_inds_fg = src_masks_box_fg.max(dim=3, keepdim=True)
+            # # src_masks_y_fg, src_x_inds_fg = src_masks_box_fg.max(dim=2, keepdim=True)
+            # # src_masks_x_bg, src_y_inds_bg = src_masks_box_bg.min(dim=3, keepdim=True)
+            # # src_masks_y_bg, src_x_inds_bg = src_masks_box_bg.min(dim=2, keepdim=True)
+            # # src_masks_x_fg = src_masks_x_fg.flatten(1, 3)
+            # # src_masks_y_fg = src_masks_y_fg.flatten(1, 3)
+            # # src_masks_x_bg = src_masks_x_bg.flatten(1, 3)
+            # # src_masks_y_bg = src_masks_y_bg.flatten(1, 3)
+            # #
+            # # # org mask
+            # # src_masks_x, src_y_inds = src_masks.max(dim=3, keepdim=True)
+            # # src_masks_y, src_x_inds = src_masks.max(dim=2, keepdim=True)
+            # # for obj_id in range(src_masks.shape[0]):
+            # #     obj_path = "/home/user/Program/jwh/Weakly-Sup-VIS/DEBUG/loss_debug/obj_{}/".format(obj_id)
+            # #     os.makedirs(obj_path, exist_ok=True)
+            # #
+            # #     src = src_masks[obj_id, 0]
+            # #     cv2.imwrite(obj_path + 'pred_{}.png'.format(obj_id), (src * 200).to(dtype=torch.uint8).cpu().numpy())
+            # #
+            # #     tgt = target_box_masks[obj_id, 0]
+            # #     cv2.imwrite(obj_path + 'gt_{}.png'.format(obj_id), tgt.to(dtype=torch.uint8).cpu().numpy() * 255)
+            # #     cv2.imwrite(obj_path + 'gt_inverse_{}.png'.format(obj_id), (1. - tgt).to(dtype=torch.uint8).cpu().numpy() * 255)
+            # #
+            # #
+            # #     cv2.imwrite(obj_path + 'pred_{}_fg.png'.format(obj_id),
+            # #                 (src_masks_box_fg[obj_id, 0] * 255).to(dtype=torch.uint8).cpu().numpy())
+            # #     cv2.imwrite(obj_path + 'pred_{}_inverse.png'.format(obj_id), ((1. - src_masks[obj_id, 0]) * 255).to(dtype=torch.uint8).cpu().numpy())
+            # #     cv2.imwrite(obj_path + 'pred_{}_bg.png'.format(obj_id),
+            # #                 (src_masks_box_bg[obj_id, 0] * 255).to(dtype=torch.uint8).cpu().numpy())
+            # #
+            # #
+            # #     org_sample_map = torch.zeros_like(src_masks[obj_id, 0])
+            # #     x_inds = src_y_inds[obj_id, 0]
+            # #     y_inds = src_x_inds[obj_id, 0]
+            # #     for ind in range(org_sample_map.shape[0]):
+            # #         org_sample_map[ind, x_inds.squeeze()[ind]] = 1
+            # #     for ind in range(org_sample_map.shape[1]):
+            # #         org_sample_map[y_inds.squeeze()[ind], ind] = 0.6
+            # #     cv2.imwrite(obj_path + 'max_sample.png'.format(obj_id), (org_sample_map * 255).to(dtype=torch.uint8).cpu().numpy())
+            # #
+            # #     fg_sample_map = torch.zeros_like(org_sample_map)
+            # #     fg_x_inds = src_y_inds_fg[obj_id, 0]
+            # #     fg_y_inds = src_x_inds_fg[obj_id, 0]
+            # #     for ind in range(fg_sample_map.shape[0]):
+            # #         fg_sample_map[ind, fg_x_inds.squeeze()[ind]] = 1
+            # #     for ind in range(fg_sample_map.shape[1]):
+            # #         fg_sample_map[fg_y_inds.squeeze()[ind], ind] = 0.6
+            # #     cv2.imwrite(obj_path + 'fg_max_sample.png'.format(obj_id), (fg_sample_map * 255).to(dtype=torch.uint8).cpu().numpy())
+            # #
+            # #     bg_sample_map = torch.zeros_like(org_sample_map)
+            # #     bg_x_inds = src_y_inds_bg[obj_id, 0]
+            # #     bg_y_inds = src_x_inds_bg[obj_id, 0]
+            # #     for ind in range(bg_sample_map.shape[0]):
+            # #         bg_sample_map[ind, bg_x_inds.squeeze()[ind]] = 1
+            # #     for ind in range(bg_sample_map.shape[1]):
+            # #         bg_sample_map[bg_y_inds.squeeze()[ind], ind] = 0.6
+            # #     cv2.imwrite(obj_path + 'bg_min_sample.png'.format(obj_id), (bg_sample_map * 255).to(dtype=torch.uint8).cpu().numpy())
+            #
+            #
+            # with torch.no_grad():
+            #     target_box_masks_x_fg = target_box_masks.max(dim=3, keepdim=True)[0].flatten(1, 3)
+            #     target_box_masks_y_fg = target_box_masks.max(dim=2, keepdim=True)[0].flatten(1, 3)
+            #     target_box_masks_x_bg = (1. - target_box_masks).max(dim=3, keepdim=True)[0].flatten(1, 3)
+            #     target_box_masks_y_bg = (1. - target_box_masks).max(dim=2, keepdim=True)[0].flatten(1, 3)
+            #
+            # losses = {
+            #     "loss_mask_projection_fg": projection2D_dice_loss_jit(
+            #         src_masks_x_fg, target_box_masks_x_fg,
+            #         src_masks_y_fg, target_box_masks_y_fg,
+            #         num_masks
+            #     ),
+            #     "loss_mask_projection_bg": projection2D_dice_loss_jit(
+            #         src_masks_x_bg, target_box_masks_x_bg,
+            #         src_masks_y_bg, target_box_masks_y_bg,
+            #         num_masks
+            #     ),
+            # }
+            #
+            # del src_masks_box_fg, src_masks_box_bg
+            # del src_masks_x_fg, src_masks_y_fg, src_masks_x_bg, src_masks_y_bg
+            # del target_box_masks_x_fg, target_box_masks_y_fg, target_box_masks_x_bg, target_box_masks_y_bg
 
+            """
+            bellow is for limited projection loss
+            """
+            tgt_boxes = BitMasks(target_box_masks.squeeze()).get_bounding_boxes().tensor  # (N, 4) in BoxMode:XYXY
+            src_masks_fg = src_masks * target_box_masks
+
+            src_masks_y, src_masks_x = [], []
+            for ind in range(src_masks.shape[0]):
+                src_mask = src_masks[ind, 0]
+                src_mask_fg = src_masks_fg[ind, 0]
+                tgt_box = tgt_boxes[ind].to(dtype=torch.uint8)
+
+                # limited projection on y axis
+                upper_region = src_mask[:tgt_box[1], :]
+                tgt_region_y = src_mask_fg[tgt_box[1]:tgt_box[3], :]
+                lower_region = src_mask[tgt_box[3]:, :]
+                src_masks_y.append(torch.cat(
+                    [
+                        upper_region.max(dim=1, keepdim=True)[0],
+                        tgt_region_y.max(dim=1, keepdim=True)[0],
+                        lower_region.max(dim=1, keepdim=True)[0],
+                    ],
+                    dim=0
+                )[None, :])
+
+                # limited projection on x axis
+                left_region = src_mask[:, :tgt_box[0]]
+                tgt_region_x = src_mask_fg[:, tgt_box[0]:tgt_box[2]]
+                right_region = src_mask[:, tgt_box[2]:]
+                src_masks_x.append(torch.cat(
+                    [
+                        left_region.max(dim=0, keepdim=True)[0],
+                        tgt_region_x.max(dim=0, keepdim=True)[0],
+                        right_region.max(dim=0, keepdim=True)[0],
+                    ],
+                    dim=1
+                )[:, None])
+
+            src_masks_y = torch.stack(src_masks_y, dim=0).flatten(1, 3)
+            src_masks_x = torch.stack(src_masks_x, dim=0).flatten(1, 3)
 
             with torch.no_grad():
                 # max projection
-                target_box_masks_x_fg = target_box_masks.max(dim=3, keepdim=True)[0].flatten(1, 3)
-                target_box_masks_y_fg = target_box_masks.max(dim=2, keepdim=True)[0].flatten(1, 3)
-                target_box_masks_x_bg = (1. - target_box_masks).max(dim=3, keepdim=True)[0].flatten(1, 3)
-                target_box_masks_y_bg = (1. - target_box_masks).max(dim=2, keepdim=True)[0].flatten(1, 3)
-
-                # target_box_masks_t = target_box_masks.max(dim=1, keepdim=True)[0].flatten(1, 3)
-
-                # topk projection
-                # target_box_masks_x = target_box_masks.topk(3, dim=3, sorted=False)[0].flatten(1, 3)
-                # target_box_masks_y = target_box_masks.topk(3, dim=2, sorted=False)[0].flatten(1, 3)
+                target_box_masks_x = target_box_masks.max(dim=2, keepdim=True)[0].flatten(1, 3)
+                target_box_masks_y = target_box_masks.max(dim=3, keepdim=True)[0].flatten(1, 3)
 
             losses = {
-                "loss_mask_projection_fg": projection2D_dice_loss_jit(
-                    src_masks_x_fg, target_box_masks_x_fg,
-                    src_masks_y_fg, target_box_masks_y_fg,
-                    # src_masks_t, target_box_masks_t,
+                "loss_mask_projection": projection2D_dice_loss_jit(
+                    src_masks_x, target_box_masks_x,
+                    src_masks_y, target_box_masks_y,
                     num_masks
-                ),
-                "loss_mask_projection_bg": projection2D_dice_loss_jit(
-                    src_masks_x_bg, target_box_masks_x_bg,
-                    src_masks_y_bg, target_box_masks_y_bg,
-                    # src_masks_t, target_box_masks_t,
-                    num_masks
-                ),
+                )
             }
-            # print(losses)
-            del src_masks_box_fg, src_masks_box_bg
-            del src_masks_x_fg, src_masks_y_fg, src_masks_x_bg, src_masks_y_bg
-            del target_box_masks_x_fg, target_box_masks_y_fg, target_box_masks_x_bg, target_box_masks_y_bg
+
+            del tgt_boxes, src_masks_fg
+            del src_masks_x, src_masks_y
+            del target_box_masks_x, target_box_masks_y
+
         else:
+            """
+            bellow is for original projection loss and limited projection loss
+            """
             losses = {
-                "loss_mask_projection_fg": torch.tensor([0], dtype=torch.float32, device=src_masks.device),
-                "loss_mask_projection_bg": torch.tensor([0], dtype=torch.float32, device=src_masks.device)
+                "loss_mask_projection": torch.tensor([0], dtype=torch.float32, device=src_masks.device),
             }
 
-        del src_masks, src_masks_bg
+            """
+            bellow is for foreground / background separate loss
+            """
+            # losses = {
+            #     "loss_mask_projection_fg": torch.tensor([0], dtype=torch.float32, device=src_masks.device),
+            #     "loss_mask_projection_bg": torch.tensor([0], dtype=torch.float32, device=src_masks.device)
+            # }
+
+
+        del src_masks
         del target_box_masks
         return losses
+
+    def _get_limited_projections(self, src_masks, tgt_boxes, tgt_box_masks):
+        tgt_boxes = BitMasks(target_box_masks.squeeze()).get_bounding_boxes().tensor  # (N, 4) in BoxMode:XYXY
+        src_masks_fg = src_masks * target_box_masks
+
+        src_masks_y, src_masks_x = [], []
+        for ind in range(src_masks.shape[0]):
+            src_mask = src_masks[ind, 0]
+            src_mask_fg = src_masks_fg[ind, 0]
+            tgt_box = tgt_boxes[ind].to(dtype=torch.uint8)
+
+            # limited projection on y axis
+            upper_region = src_mask[:tgt_box[1], :]
+            tgt_region_y = src_mask_fg[tgt_box[1]:tgt_box[3], :]
+            lower_region = src_mask[tgt_box[3]:, :]
+            src_masks_y.append(torch.cat(
+                [
+                    upper_region.max(dim=1, keepdim=True)[0],
+                    tgt_region_y.max(dim=1, keepdim=True)[0],
+                    lower_region.max(dim=1, keepdim=True)[0],
+                ],
+                dim=0
+            )[None, :])
+
+            # limited projection on x axis
+            left_region = src_mask[:, :tgt_box[0]]
+            tgt_region_x = src_mask_fg[:, tgt_box[0]:tgt_box[2]]
+            right_region = src_mask[:, tgt_box[2]:]
+            src_masks_x.append(torch.cat(
+                [
+                    left_region.max(dim=0, keepdim=True)[0],
+                    tgt_region_x.max(dim=0, keepdim=True)[0],
+                    right_region.max(dim=0, keepdim=True)[0],
+                ],
+                dim=1
+            )[:, None])
+
+        src_masks_y = torch.stack(src_masks_y, dim=0).flatten(1, 3)
+        src_masks_x = torch.stack(src_masks_x, dim=0).flatten(1, 3)
+        return src_masks_x, src_masks_y
 
     def _get_src_permutation_idx(self, indices):
         # permute predictions following indices
