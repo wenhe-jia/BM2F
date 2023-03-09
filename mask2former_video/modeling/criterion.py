@@ -362,43 +362,7 @@ class VideoSetCriterionProjMask(nn.Module):
             """
             bellow is for limited projection loss
             """
-            tgt_boxes = BitMasks(target_box_masks.squeeze()).get_bounding_boxes().tensor  # (N, 4) in BoxMode:XYXY
-            src_masks_fg = src_masks * target_box_masks
-
-            src_masks_y, src_masks_x = [], []
-            for ind in range(src_masks.shape[0]):
-                src_mask = src_masks[ind, 0]
-                src_mask_fg = src_masks_fg[ind, 0]
-                tgt_box = tgt_boxes[ind].to(dtype=torch.uint8)
-
-                # limited projection on y axis
-                upper_region = src_mask[:tgt_box[1], :]
-                tgt_region_y = src_mask_fg[tgt_box[1]:tgt_box[3], :]
-                lower_region = src_mask[tgt_box[3]:, :]
-                src_masks_y.append(torch.cat(
-                    [
-                        upper_region.max(dim=1, keepdim=True)[0],
-                        tgt_region_y.max(dim=1, keepdim=True)[0],
-                        lower_region.max(dim=1, keepdim=True)[0],
-                    ],
-                    dim=0
-                )[None, :])
-
-                # limited projection on x axis
-                left_region = src_mask[:, :tgt_box[0]]
-                tgt_region_x = src_mask_fg[:, tgt_box[0]:tgt_box[2]]
-                right_region = src_mask[:, tgt_box[2]:]
-                src_masks_x.append(torch.cat(
-                    [
-                        left_region.max(dim=0, keepdim=True)[0],
-                        tgt_region_x.max(dim=0, keepdim=True)[0],
-                        right_region.max(dim=0, keepdim=True)[0],
-                    ],
-                    dim=1
-                )[:, None])
-
-            src_masks_y = torch.stack(src_masks_y, dim=0).flatten(1, 3)
-            src_masks_x = torch.stack(src_masks_x, dim=0).flatten(1, 3)
+            src_masks_y, src_masks_x = self._get_limited_projections(src_masks, target_box_masks)
 
             with torch.no_grad():
                 # max projection
@@ -438,9 +402,9 @@ class VideoSetCriterionProjMask(nn.Module):
         del target_box_masks
         return losses
 
-    def _get_limited_projections(self, src_masks, tgt_boxes, tgt_box_masks):
+    def _get_limited_projections(self, src_masks, tgt_box_masks):
         tgt_boxes = BitMasks(target_box_masks.squeeze()).get_bounding_boxes().tensor  # (N, 4) in BoxMode:XYXY
-        src_masks_fg = src_masks * target_box_masks
+        src_masks_fg = src_masks * tgt_box_masks
 
         src_masks_y, src_masks_x = [], []
         for ind in range(src_masks.shape[0]):
@@ -449,34 +413,26 @@ class VideoSetCriterionProjMask(nn.Module):
             tgt_box = tgt_boxes[ind].to(dtype=torch.uint8)
 
             # limited projection on y axis
-            upper_region = src_mask[:tgt_box[1], :]
-            tgt_region_y = src_mask_fg[tgt_box[1]:tgt_box[3], :]
-            lower_region = src_mask[tgt_box[3]:, :]
-            src_masks_y.append(torch.cat(
-                [
-                    upper_region.max(dim=1, keepdim=True)[0],
-                    tgt_region_y.max(dim=1, keepdim=True)[0],
-                    lower_region.max(dim=1, keepdim=True)[0],
-                ],
-                dim=0
-            )[None, :])
+            upper_region = src_mask[:tgt_box[1], :].max(dim=1, keepdim=True)[0]
+            tgt_region_y = src_mask_fg[tgt_box[1]:tgt_box[3], :].max(dim=1, keepdim=True)[0]
+            lower_region = src_mask[tgt_box[3]:, :].max(dim=1, keepdim=True)[0]
+            src_masks_y.append(torch.cat([upper_region, tgt_region_y, lower_region], dim=0)[None, :])
 
             # limited projection on x axis
-            left_region = src_mask[:, :tgt_box[0]]
-            tgt_region_x = src_mask_fg[:, tgt_box[0]:tgt_box[2]]
-            right_region = src_mask[:, tgt_box[2]:]
-            src_masks_x.append(torch.cat(
-                [
-                    left_region.max(dim=0, keepdim=True)[0],
-                    tgt_region_x.max(dim=0, keepdim=True)[0],
-                    right_region.max(dim=0, keepdim=True)[0],
-                ],
-                dim=1
-            )[:, None])
+            left_region = src_mask[:, :tgt_box[0]].max(dim=0, keepdim=True)[0]
+            tgt_region_x = src_mask_fg[:, tgt_box[0]:tgt_box[2]].max(dim=0, keepdim=True)[0]
+            right_region = src_mask[:, tgt_box[2]:].max(dim=0, keepdim=True)[0]
+            src_masks_x.append(torch.cat([left_region, tgt_region_x, right_region], dim=1)[:, None])
 
-        src_masks_y = torch.stack(src_masks_y, dim=0).flatten(1, 3)
-        src_masks_x = torch.stack(src_masks_x, dim=0).flatten(1, 3)
-        return src_masks_x, src_masks_y
+        try:
+            src_masks_y = torch.stack(src_masks_y, dim=0).flatten(1, 3)
+            src_masks_x = torch.stack(src_masks_x, dim=0).flatten(1, 3)
+        except:
+            print("src_masks: ", src_masks.shape)
+            print("tgt_boxes: ", tgt_boxes)
+            for i in range(len(src_masks_x)):
+                print('y:', src_masks_y[i].shape, 'x: ', src_masks_x[i])
+        return src_masks_y, src_masks_x
 
     def _get_src_permutation_idx(self, indices):
         # permute predictions following indices
