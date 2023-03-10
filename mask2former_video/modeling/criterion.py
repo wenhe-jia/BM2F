@@ -409,35 +409,44 @@ class VideoSetCriterionProjMask(nn.Module):
         for ind in range(src_masks.shape[0]):
             src_mask = src_masks[ind, 0]
             src_mask_fg = src_masks_fg[ind, 0]
-            tgt_box = tgt_boxes[ind].to(dtype=torch.uint8)
+            tgt_box = tgt_boxes[ind].int()
+            # tgt_box = BitMasks(tgt_box_masks[ind]).get_bounding_boxes().tensor.to(dtype=torch.uint8)[0]
 
             # limited projection on y axis
             upper_region_proj_y = src_mask[:tgt_box[1], :].max(dim=1, keepdim=True)[0]
             tgt_region_proj_y = src_mask_fg[tgt_box[1]:tgt_box[3], :].max(dim=1, keepdim=True)[0]
             lower_region_proj_y = src_mask[tgt_box[3]:, :].max(dim=1, keepdim=True)[0]
-            src_masks_y.append(torch.cat([upper_region_proj_y, tgt_region_proj_y, lower_region_proj_y], dim=0)[None, :])
+            proj_y = torch.cat([upper_region_proj_y, tgt_region_proj_y, lower_region_proj_y], dim=0)[None, :]
+            src_masks_y.append(proj_y)
+
+            assert proj_y.shape[-2] == src_mask.shape[0], \
+                "proj x: {} vs org: {} | box: {}, upper: {}, tgt: {}, lower: {}".format(
+                    proj_y.shape, src_masks.shape, tgt_box,
+                    src_mask[:tgt_box[1], :].shape,
+                    src_mask_fg[tgt_box[1]:tgt_box[3], :].shape,
+                    src_mask[tgt_box[3]:, :].shape
+                )
 
             # limited projection on x axis
             left_region_proj_x = src_mask[:, :tgt_box[0]].max(dim=0, keepdim=True)[0]
             tgt_region_proj_x = src_mask_fg[:, tgt_box[0]:tgt_box[2]].max(dim=0, keepdim=True)[0]
             right_region_proj_x = src_mask[:, tgt_box[2]:].max(dim=0, keepdim=True)[0]
-            src_masks_x.append(torch.cat([left_region_proj_x, tgt_region_proj_x, right_region_proj_x], dim=1)[:, None])
+            proj_x = torch.cat([left_region_proj_x, tgt_region_proj_x, right_region_proj_x], dim=1)[:, None]
+            src_masks_x.append(proj_x)
 
-        # print("src_masks: ", src_masks.shape)
-        # print("tgt_boxes: ", tgt_boxes)
-        # for i in range(len(src_masks_x)):
-        #     print('y:', src_masks_y[i].shape, 'x: ', src_masks_x[i].shape)
+            if proj_x.shape[-1] != src_mask.shape[1]:
+                cv2.imwrite('/home/user/Program/jwh/gt_box_mask.png', tgt_box_masks[ind, 0].to(dtype=torch.uint8).cpu().numpy()*255)
 
-        # try:
+            assert proj_x.shape[-1] == src_mask.shape[1], \
+                "proj x: {} vs org: {} | box: {}, left: {}, tgt: {}, right: {}".format(
+                    proj_x.shape, src_masks.shape, tgt_box,
+                    src_mask[:, :tgt_box[0]].shape,
+                    src_mask_fg[:, tgt_box[0]:tgt_box[2]].shape,
+                    src_mask[:, tgt_box[2]:].shape
+                )
+
         _src_masks_y = torch.stack(src_masks_y, dim=0).flatten(1, 3)
         _src_masks_x = torch.stack(src_masks_x, dim=0).flatten(1, 3)
-        # except:
-        #     print("src_masks: ", src_masks.shape)
-        #     print("tgt_boxes: ", tgt_boxes)
-        #     for i in range(len(src_masks_x)):
-        #         print('y:', src_masks_y[i].shape, 'x: ', src_masks_x[i].shape)
-        # print("output: ", _src_masks_y.shape, _src_masks_x.shape)
-        # print("---------\n")
         return _src_masks_y, _src_masks_x
 
     def _get_src_permutation_idx(self, indices):
