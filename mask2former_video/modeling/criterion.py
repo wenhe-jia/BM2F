@@ -423,10 +423,10 @@ class VideoSetCriterionProjMask(nn.Module):
             right_region_proj_x = src_mask[:, tgt_box[2]:].max(dim=0, keepdim=True)[0]
             src_masks_x.append(torch.cat([left_region_proj_x, tgt_region_proj_x, right_region_proj_x], dim=1)[:, None])
 
-        print("src_masks: ", src_masks.shape)
-        print("tgt_boxes: ", tgt_boxes)
-        for i in range(len(src_masks_x)):
-            print('y:', src_masks_y[i].shape, 'x: ', src_masks_x[i].shape)
+        # print("src_masks: ", src_masks.shape)
+        # print("tgt_boxes: ", tgt_boxes)
+        # for i in range(len(src_masks_x)):
+        #     print('y:', src_masks_y[i].shape, 'x: ', src_masks_x[i].shape)
 
         # try:
         _src_masks_y = torch.stack(src_masks_y, dim=0).flatten(1, 3)
@@ -436,8 +436,8 @@ class VideoSetCriterionProjMask(nn.Module):
         #     print("tgt_boxes: ", tgt_boxes)
         #     for i in range(len(src_masks_x)):
         #         print('y:', src_masks_y[i].shape, 'x: ', src_masks_x[i].shape)
-        print("output: ", _src_masks_y.shape, _src_masks_x.shape)
-        print("==============\n")
+        # print("output: ", _src_masks_y.shape, _src_masks_x.shape)
+        # print("---------\n")
         return _src_masks_y, _src_masks_x
 
     def _get_src_permutation_idx(self, indices):
