@@ -436,7 +436,9 @@ class VideoSetCriterionProjMask(nn.Module):
         #     print("tgt_boxes: ", tgt_boxes)
         #     for i in range(len(src_masks_x)):
         #         print('y:', src_masks_y[i].shape, 'x: ', src_masks_x[i].shape)
-        return src_masks_y, src_masks_x
+        print("output: ", _src_masks_y.shape, _src_masks_x.shape)
+        print("==============\n")
+        return _src_masks_y, _src_masks_x
 
     def _get_src_permutation_idx(self, indices):
         # permute predictions following indices
