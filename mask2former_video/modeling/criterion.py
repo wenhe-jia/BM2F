@@ -419,31 +419,12 @@ class VideoSetCriterionProjMask(nn.Module):
             proj_y = torch.cat([upper_region_proj_y, tgt_region_proj_y, lower_region_proj_y], dim=0)[None, :]
             src_masks_y.append(proj_y)
 
-            assert proj_y.shape[-2] == src_mask.shape[0], \
-                "proj x: {} vs org: {} | box: {}, upper: {}, tgt: {}, lower: {}".format(
-                    proj_y.shape, src_masks.shape, tgt_box,
-                    src_mask[:tgt_box[1], :].shape,
-                    src_mask_fg[tgt_box[1]:tgt_box[3], :].shape,
-                    src_mask[tgt_box[3]:, :].shape
-                )
-
             # limited projection on x axis
             left_region_proj_x = src_mask[:, :tgt_box[0]].max(dim=0, keepdim=True)[0]
             tgt_region_proj_x = src_mask_fg[:, tgt_box[0]:tgt_box[2]].max(dim=0, keepdim=True)[0]
             right_region_proj_x = src_mask[:, tgt_box[2]:].max(dim=0, keepdim=True)[0]
             proj_x = torch.cat([left_region_proj_x, tgt_region_proj_x, right_region_proj_x], dim=1)[:, None]
             src_masks_x.append(proj_x)
-
-            if proj_x.shape[-1] != src_mask.shape[1]:
-                cv2.imwrite('/home/user/Program/jwh/gt_box_mask.png', tgt_box_masks[ind, 0].to(dtype=torch.uint8).cpu().numpy()*255)
-
-            assert proj_x.shape[-1] == src_mask.shape[1], \
-                "proj x: {} vs org: {} | box: {}, left: {}, tgt: {}, right: {}".format(
-                    proj_x.shape, src_masks.shape, tgt_box,
-                    src_mask[:, :tgt_box[0]].shape,
-                    src_mask_fg[:, tgt_box[0]:tgt_box[2]].shape,
-                    src_mask[:, tgt_box[2]:].shape
-                )
 
         _src_masks_y = torch.stack(src_masks_y, dim=0).flatten(1, 3)
         _src_masks_x = torch.stack(src_masks_x, dim=0).flatten(1, 3)

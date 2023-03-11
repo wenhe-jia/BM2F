@@ -11,6 +11,7 @@ from torch.cuda.amp import autocast
 from torchvision.ops.boxes import box_area
 
 from detectron2.projects.point_rend.point_features import point_sample
+from detectron2.structures.masks import BitMasks
 
 
 def batch_dice_loss(inputs: torch.Tensor, targets: torch.Tensor):
@@ -48,6 +49,75 @@ def calculate_axis_projection(out_mask, tgt_box_mask, axis):
     tgt_box_mask_axis = tgt_box_mask.max(dim=axis, keepdim=True)[0].flatten(1, 3).float()  # (N, T*(H or W))
 
     return batch_dice_loss_jit(src_mask_axis, tgt_box_mask_axis)
+
+
+def item_dice(inputs: torch.Tensor, targets: torch.Tensor):
+    numerator = 2 * torch.dot(inputs, targets)
+    denominator = inputs.sum(-1) + targets.sum(-1)
+    dice_cost = 1 - (numerator + 1) / (denominator + 1)
+    return dice_cost
+
+def calculate_axis_projection_limited(out_mask, tgt_box_mask):
+    """
+
+    :param out_mask: (Q, T, H, W)
+    :param tgt_box_mask: (G, T, H, W)
+    :param axis: int, axis to perform projection
+    :return:
+    """
+    Q = out_mask.shape[0]
+    G = tgt_box_mask.shape[0]
+    T = out_mask.shape[1]
+
+    out_mask = out_mask.sigmoid()
+
+    tgt_box_mask_y = tgt_box_mask.max(dim=3, keepdim=True)[0]
+    tgt_box_mask_x = tgt_box_mask.max(dim=2, keepdim=True)[0]
+
+    cost_mtrx = []
+    for out_ind in range(Q):
+        out_IdvMasks = out_mask[out_ind]  # (T, H, W)
+
+        cost_IdvSrc_to_Tgts = []
+        for tgt_ind in range(G):
+            tgt_IdvMasks = tgt_box_mask[tgt_ind]  # (T, H, W)
+            assert out_IdvMasks.shape == tgt_IdvMasks.shape
+            tgt_IdvBoxes = BitMasks(tgt_IdvMasks).get_bounding_boxes().tensor.int()
+
+            out_IdvProj_y, out_IdvProj_x = [], []
+            for t_ind in range(T):
+                out_IdvMask_t = out_IdvMasks[t_ind]
+                tgt_IdvMask_t = tgt_IdvMasks[t_ind]
+                tgt_Idvbox_t = tgt_IdvBoxes[t_ind]
+                out_IdvMask_t_fg = out_IdvMask_t * tgt_IdvMask_t
+
+                # limited projection on y axis
+                upper_region_proj_y = out_IdvMask_t[:tgt_Idvbox_t[1], :].max(dim=1, keepdim=True)[0]
+                tgt_region_proj_y = out_IdvMask_t_fg[tgt_Idvbox_t[1]:tgt_Idvbox_t[3], :].max(dim=1, keepdim=True)[0]
+                lower_region_proj_y = out_IdvMask_t[tgt_Idvbox_t[3]:, :].max(dim=1, keepdim=True)[0]
+                out_proj_y_t = torch.cat([upper_region_proj_y, tgt_region_proj_y, lower_region_proj_y], dim=0)  # (H, 1)
+                out_IdvProj_y.append(out_proj_y_t)
+
+                # limited projection on x axis
+                left_region_proj_x = out_IdvMask_t[:, :tgt_Idvbox_t[0]].max(dim=0, keepdim=True)[0]
+                tgt_region_proj_x = out_IdvMask_t_fg[:, tgt_Idvbox_t[0]:tgt_Idvbox_t[2]].max(dim=0, keepdim=True)[0]
+                right_region_proj_x = out_IdvMask_t[:, tgt_Idvbox_t[2]:].max(dim=0, keepdim=True)[0]
+                out_proj_x_t = torch.cat([left_region_proj_x, tgt_region_proj_x, right_region_proj_x], dim=1)  # (1, W)
+                out_IdvProj_x.append(out_proj_x_t)
+
+            # [(H, 1) * T] -> (T, H, 1) -> (T*H), [(1, W) * T] -> (T, 1, W) -> (T*W)
+            out_IdvProj_y = torch.stack(out_IdvProj_y, dim=0).flatten(0)
+            out_IdvProj_x = torch.stack(out_IdvProj_x, dim=0).flatten(0)
+
+            tgt_IdvProj_y = tgt_box_mask_y[tgt_ind].flatten(0)
+            tgt_IdvProj_x = tgt_box_mask_x[tgt_ind].flatten(0)
+
+            cost_item = item_dice(out_IdvProj_y, tgt_IdvProj_y) + item_dice(out_IdvProj_x, tgt_IdvProj_x)  # (1,)
+            cost_IdvSrc_to_Tgts.append(cost_item)
+        cost_IdvSrc_to_Tgts = torch.stack(cost_IdvSrc_to_Tgts, dim=0)  # (G,)
+        cost_mtrx.append(cost_IdvSrc_to_Tgts)
+    cost_mtrx = torch.stack(cost_mtrx, dim=0)  # (Q, G)
+    return cost_mtrx
 
 
 def batch_sigmoid_ce_loss(inputs: torch.Tensor, targets: torch.Tensor):
@@ -124,7 +194,7 @@ def calculate_projection_dice(out_masks, tgt_box_masks, axis, bg_projection):
     :param out_masks: (Q, T, H, W)
     :param tgt_box_masks: (G, T, H, W)
     :param axis: int, axis to perform projection
-    :param type: perform on foreground/background
+    :param bg_projection: perform on foreground/background
     :return: projection dice cost matrix of shape: (Q, G)
     """
     out_masks = out_masks.sigmoid()
@@ -213,11 +283,13 @@ class VideoHungarianMatcherProjMask(nn.Module):
                     #                   calculate_axis_projection(out_mask, tgt_box_mask, 2)
 
                     # fg/bg projection
-                    cost_projection = calculate_projection_dice(out_mask, tgt_box_mask, 3, False) + \
-                                      calculate_projection_dice(out_mask, tgt_box_mask, 2, False) + \
-                                      calculate_projection_dice(out_mask, tgt_box_mask, 3, True) + \
-                                      calculate_projection_dice(out_mask, tgt_box_mask, 2, True)
+                    # cost_projection = calculate_projection_dice(out_mask, tgt_box_mask, 3, False) + \
+                    #                   calculate_projection_dice(out_mask, tgt_box_mask, 2, False) + \
+                    #                   calculate_projection_dice(out_mask, tgt_box_mask, 3, True) + \
+                    #                   calculate_projection_dice(out_mask, tgt_box_mask, 2, True)
 
+                    # limited projection
+                    cost_projection = calculate_axis_projection_limited(out_mask, tgt_box_mask)
 
             else:
                 cost_projection = torch.zeros((100, 0), dtype=torch.float32, device=out_prob.device)
