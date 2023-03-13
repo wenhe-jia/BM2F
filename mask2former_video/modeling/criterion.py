@@ -402,14 +402,14 @@ class VideoSetCriterionProjMask(nn.Module):
         return losses
 
     def _get_limited_projections(self, src_masks, tgt_box_masks):
-        tgt_boxes = BitMasks(tgt_box_masks.squeeze()).get_bounding_boxes().tensor  # (N, 4) in BoxMode:XYXY
+        tgt_boxes = BitMasks(tgt_box_masks.squeeze()).get_bounding_boxes().tensor.to(dtype=torch.int64)  # (N, 4) in BoxMode:XYXY
         src_masks_fg = src_masks * tgt_box_masks
 
         src_masks_y, src_masks_x = [], []
         for ind in range(src_masks.shape[0]):
             src_mask = src_masks[ind, 0]
             src_mask_fg = src_masks_fg[ind, 0]
-            tgt_box = tgt_boxes[ind].int()
+            tgt_box = tgt_boxes[ind]
             # tgt_box = BitMasks(tgt_box_masks[ind]).get_bounding_boxes().tensor.to(dtype=torch.uint8)[0]
 
             # limited projection on y axis

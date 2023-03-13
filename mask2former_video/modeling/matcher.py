@@ -82,7 +82,7 @@ def calculate_axis_projection_limited(out_mask, tgt_box_mask):
         for tgt_ind in range(G):
             tgt_IdvMasks = tgt_box_mask[tgt_ind]  # (T, H, W)
             assert out_IdvMasks.shape == tgt_IdvMasks.shape
-            tgt_IdvBoxes = BitMasks(tgt_IdvMasks).get_bounding_boxes().tensor.int()
+            tgt_IdvBoxes = BitMasks(tgt_IdvMasks).get_bounding_boxes().tensor.to(dtype=torch.int64)  # (T, 4)
 
             out_IdvProj_y, out_IdvProj_x = [], []
             for t_ind in range(T):

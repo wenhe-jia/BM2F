@@ -252,7 +252,7 @@ class VideoMaskFormer(nn.Module):
                 )
             )
 
-            vid_path = '/home/user/Program/jwh/Weakly-Sup-VIS/' + self.output_dir + '/vis/vid_' + \
+            vid_path = self.output_dir + '/vis/vid_' + \
                        batched_inputs[0]['file_names'][0].split('/')[-2] + '/'
             os.makedirs(vid_path, exist_ok=True)
 
