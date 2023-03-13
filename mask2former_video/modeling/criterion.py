@@ -276,66 +276,6 @@ class VideoSetCriterionProjMask(nn.Module):
             # src_masks_x_bg = src_masks_box_bg.min(dim=3, keepdim=True)[0].flatten(1, 3)
             # src_masks_y_bg = src_masks_box_bg.min(dim=2, keepdim=True)[0].flatten(1, 3)
             #
-            # # # (NT, 1, H, 1) or (NT, 1, 1, W)
-            # # src_masks_x_fg, src_y_inds_fg = src_masks_box_fg.max(dim=3, keepdim=True)
-            # # src_masks_y_fg, src_x_inds_fg = src_masks_box_fg.max(dim=2, keepdim=True)
-            # # src_masks_x_bg, src_y_inds_bg = src_masks_box_bg.min(dim=3, keepdim=True)
-            # # src_masks_y_bg, src_x_inds_bg = src_masks_box_bg.min(dim=2, keepdim=True)
-            # # src_masks_x_fg = src_masks_x_fg.flatten(1, 3)
-            # # src_masks_y_fg = src_masks_y_fg.flatten(1, 3)
-            # # src_masks_x_bg = src_masks_x_bg.flatten(1, 3)
-            # # src_masks_y_bg = src_masks_y_bg.flatten(1, 3)
-            # #
-            # # # org mask
-            # # src_masks_x, src_y_inds = src_masks.max(dim=3, keepdim=True)
-            # # src_masks_y, src_x_inds = src_masks.max(dim=2, keepdim=True)
-            # # for obj_id in range(src_masks.shape[0]):
-            # #     obj_path = "/home/user/Program/jwh/Weakly-Sup-VIS/DEBUG/loss_debug/obj_{}/".format(obj_id)
-            # #     os.makedirs(obj_path, exist_ok=True)
-            # #
-            # #     src = src_masks[obj_id, 0]
-            # #     cv2.imwrite(obj_path + 'pred_{}.png'.format(obj_id), (src * 200).to(dtype=torch.uint8).cpu().numpy())
-            # #
-            # #     tgt = target_box_masks[obj_id, 0]
-            # #     cv2.imwrite(obj_path + 'gt_{}.png'.format(obj_id), tgt.to(dtype=torch.uint8).cpu().numpy() * 255)
-            # #     cv2.imwrite(obj_path + 'gt_inverse_{}.png'.format(obj_id), (1. - tgt).to(dtype=torch.uint8).cpu().numpy() * 255)
-            # #
-            # #
-            # #     cv2.imwrite(obj_path + 'pred_{}_fg.png'.format(obj_id),
-            # #                 (src_masks_box_fg[obj_id, 0] * 255).to(dtype=torch.uint8).cpu().numpy())
-            # #     cv2.imwrite(obj_path + 'pred_{}_inverse.png'.format(obj_id), ((1. - src_masks[obj_id, 0]) * 255).to(dtype=torch.uint8).cpu().numpy())
-            # #     cv2.imwrite(obj_path + 'pred_{}_bg.png'.format(obj_id),
-            # #                 (src_masks_box_bg[obj_id, 0] * 255).to(dtype=torch.uint8).cpu().numpy())
-            # #
-            # #
-            # #     org_sample_map = torch.zeros_like(src_masks[obj_id, 0])
-            # #     x_inds = src_y_inds[obj_id, 0]
-            # #     y_inds = src_x_inds[obj_id, 0]
-            # #     for ind in range(org_sample_map.shape[0]):
-            # #         org_sample_map[ind, x_inds.squeeze()[ind]] = 1
-            # #     for ind in range(org_sample_map.shape[1]):
-            # #         org_sample_map[y_inds.squeeze()[ind], ind] = 0.6
-            # #     cv2.imwrite(obj_path + 'max_sample.png'.format(obj_id), (org_sample_map * 255).to(dtype=torch.uint8).cpu().numpy())
-            # #
-            # #     fg_sample_map = torch.zeros_like(org_sample_map)
-            # #     fg_x_inds = src_y_inds_fg[obj_id, 0]
-            # #     fg_y_inds = src_x_inds_fg[obj_id, 0]
-            # #     for ind in range(fg_sample_map.shape[0]):
-            # #         fg_sample_map[ind, fg_x_inds.squeeze()[ind]] = 1
-            # #     for ind in range(fg_sample_map.shape[1]):
-            # #         fg_sample_map[fg_y_inds.squeeze()[ind], ind] = 0.6
-            # #     cv2.imwrite(obj_path + 'fg_max_sample.png'.format(obj_id), (fg_sample_map * 255).to(dtype=torch.uint8).cpu().numpy())
-            # #
-            # #     bg_sample_map = torch.zeros_like(org_sample_map)
-            # #     bg_x_inds = src_y_inds_bg[obj_id, 0]
-            # #     bg_y_inds = src_x_inds_bg[obj_id, 0]
-            # #     for ind in range(bg_sample_map.shape[0]):
-            # #         bg_sample_map[ind, bg_x_inds.squeeze()[ind]] = 1
-            # #     for ind in range(bg_sample_map.shape[1]):
-            # #         bg_sample_map[bg_y_inds.squeeze()[ind], ind] = 0.6
-            # #     cv2.imwrite(obj_path + 'bg_min_sample.png'.format(obj_id), (bg_sample_map * 255).to(dtype=torch.uint8).cpu().numpy())
-            #
-            #
             # with torch.no_grad():
             #     target_box_masks_x_fg = target_box_masks.max(dim=3, keepdim=True)[0].flatten(1, 3)
             #     target_box_masks_y_fg = target_box_masks.max(dim=2, keepdim=True)[0].flatten(1, 3)
