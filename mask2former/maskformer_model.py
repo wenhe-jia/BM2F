@@ -18,10 +18,11 @@ from detectron2.utils.memory import retry_if_cuda_oom
 from detectron2.structures.masks import BitMasks
 
 from .modeling.criterion import SetCriterion, SetCriterionProjection, SetCriterionWeakSup
-from .modeling.matcher import HungarianMatcherMask, HungarianMatcherProjMask, HungarianMatcherWeakSup
+from .modeling.matcher import HungarianMatcherProjMask, HungarianMatcherWeakSup
 from .utils.weaksup_utils import unfold_wo_center, get_images_color_similarity
 
 from skimage import color
+import copy
 
 
 @META_ARCH_REGISTRY.register()
@@ -400,31 +401,31 @@ class MaskFormer(nn.Module):
     def prepare_weaksup_targets(self, targets, org_images, img_heights):
         # 使用没有经过ImageList之前的图像是为了把每张mask底部的若干像素置为0
         # masks of org image shape
-        org_image_masks = [torch.ones_like(x[0], dtype=torch.float32) for x in org_images]
-        # mask out the bottom area where the COCO dataset probably has wrong annotations
-        for i in range(len(org_image_masks)):
-            im_h = img_heights[i]
-            pixels_removed = int(
-                self.bottom_pixels_removed *
-                float(org_images[i].size(1)) / float(im_h)
-            )
-            if pixels_removed > 0:
-                org_image_masks[i][-pixels_removed:, :] = 0
+        # org_image_masks = [torch.ones_like(x[0], dtype=torch.float32) for x in org_images]
+        # # mask out the bottom area where the COCO dataset probably has wrong annotations
+        # for i in range(len(org_image_masks)):
+        #     im_h = img_heights[i]
+        #     pixels_removed = int(
+        #         self.bottom_pixels_removed *
+        #         float(org_images[i].size(1)) / float(im_h)
+        #     )
+        #     if pixels_removed > 0:
+        #         org_image_masks[i][-pixels_removed:, :] = 0
 
         # calculate color similarity, pad org images which is not normalized by pix mean and std
         original_images = ImageList.from_tensors(org_images, self.size_divisibility).tensor
-        original_image_masks = ImageList.from_tensors(org_image_masks, self.size_divisibility, pad_value=0.0).tensor
+        # original_image_masks = ImageList.from_tensors(org_image_masks, self.size_divisibility, pad_value=0.0).tensor
 
         stride = self.mask_out_stride  # 4
         start = int(stride // 2)
         assert original_images.size(2) % stride == 0
         assert original_images.size(3) % stride == 0
         # down sample org image and masks(of torch.ones)
-        downsampled_images = F.avg_pool2d(
-            original_images.float(), kernel_size=stride,
-            stride=stride, padding=0
-        )[:, [2, 1, 0]]  # (N, C, H, W) --> (N, C, H/4, W/4) --> (N, W/4, H/4, C)
-        downsampled_image_masks = original_image_masks[:, start::stride, start::stride]  # (N, H/4, W/4), do not use interpolate to ensure org pixel
+        # downsampled_images = F.avg_pool2d(
+        #     original_images.float(), kernel_size=stride,
+        #     stride=stride, padding=0
+        # )[:, [2, 1, 0]]  # (N, C, H, W) --> (N, C, H/4, W/4) --> (N, W/4, H/4, C)
+        # downsampled_image_masks = original_image_masks[:, start::stride, start::stride]  # (N, H/4, W/4), do not use interpolate to ensure org pixel
 
         h_pad, w_pad = original_images.shape[-2:]  ###
         new_targets = []  # store targets of each image
@@ -437,11 +438,29 @@ class MaskFormer(nn.Module):
             #     self.pairwise_size, self.pairwise_dilation
             # )  # (1, k*k-1, H/4, W/4)
 
+            ###### for progressive projection upper bounds with gt_mask #####
+            gt_masks = targets_per_image.gt_masks
+            padded_masks = torch.zeros(
+                (gt_masks.shape[0], h_pad, w_pad), dtype=gt_masks.dtype, device=gt_masks.device
+            )
+            padded_masks[:, : gt_masks.shape[1], : gt_masks.shape[2]] = gt_masks
+
+            # gt box mask
             gt_boxes = targets_per_image.gt_boxes.tensor  # (N, 4)
             box_masks_full_per_image = torch.zeros(
-                (gt_boxes.shape[0], h_pad, w_pad),
-                dtype=gt_boxes.dtype,
-                device=gt_boxes.device
+                (gt_boxes.shape[0], h_pad, w_pad), dtype=torch.float32, device=self.device
+            )
+            left_bounds_full_per_image = torch.zeros(
+                (gt_boxes.shape[0], h_pad), dtype=torch.float32, device=self.device
+            )
+            right_bounds_full_per_image = torch.zeros(
+                (gt_boxes.shape[0], h_pad), dtype=torch.float32, device=self.device
+            )
+            top_bounds_full_per_image = torch.zeros(
+                (gt_boxes.shape[0], w_pad), dtype=torch.float32, device=self.device
+            )
+            bottom_bounds_full_per_image = torch.zeros(
+                (gt_boxes.shape[0], w_pad), dtype=torch.float32, device=self.device
             )
 
             if gt_boxes.shape[0] > 0:
@@ -453,20 +472,53 @@ class MaskFormer(nn.Module):
                         int(gt_box[0]):int(gt_box[2]) + 1
                     ] = 1.0
 
+                    # left_bounds_full_per_image[ins_i, :int(gt_box[1])] = 0.
+                    # left_bounds_full_per_image[ins_i, int(gt_box[1]):int(gt_box[3] + 1)] = int(gt_box[0])
+                    # left_bounds_full_per_image[ins_i, int(gt_box[3] + 1):] = 0.
+                    # 
+                    # right_bounds_full_per_image[ins_i, :int(gt_box[1])] = w_pad
+                    # right_bounds_full_per_image[ins_i, int(gt_box[1]):int(gt_box[3] + 1)] = int(gt_box[2] + 1)
+                    # right_bounds_full_per_image[ins_i, int(gt_box[3] + 1):] = w_pad
+                    # 
+                    # top_bounds_full_per_image[ins_i, :int(gt_box[0])] = 0.
+                    # top_bounds_full_per_image[ins_i, int(gt_box[0]):int(gt_box[2] + 1)] = int(gt_box[1])
+                    # top_bounds_full_per_image[ins_i, int(gt_box[2] + 1):] = 0.
+                    # 
+                    # bottom_bounds_full_per_image[ins_i, :int(gt_box[0])] = h_pad
+                    # bottom_bounds_full_per_image[ins_i, int(gt_box[0]):int(gt_box[2] + 1)] = int(gt_box[3] + 1)
+                    # bottom_bounds_full_per_image[ins_i, int(gt_box[2] + 1):] = h_pad
+
+                    ###### for progressive projection upper bounds with gt_mask #####
+                    padded_gt_mask = padded_masks[ins_i].int()  # (H, W)
+                    # bounds for y projection
+                    left_bounds_full_per_image[ins_i] = torch.argmax(padded_gt_mask, dim=1)
+                    right_bounds_full_per_image[ins_i] = padded_gt_mask.shape[1] - \
+                                                         torch.argmax(padded_gt_mask.flip(1), dim=1)
+                    # bounds for x projection
+                    top_bounds_full_per_image[ins_i] = torch.argmax(padded_gt_mask, dim=0)
+                    bottom_bounds_full_per_image[ins_i] = padded_gt_mask.shape[0] - \
+                                                          torch.argmax(padded_gt_mask.flip(0), dim=0)
+
             box_masks_per_image = box_masks_full_per_image[:, start::stride, start::stride]
+            left_bounds_per_image = left_bounds_full_per_image[:, start::stride] / stride
+            right_bounds_per_image = right_bounds_full_per_image[:, start::stride] / stride
+            top_bounds_per_image = top_bounds_full_per_image[:, start::stride] / stride
+            bottom_bounds_per_image = bottom_bounds_full_per_image[:, start::stride] / stride
 
             new_targets.append(
                 {
                     "labels": targets_per_image.gt_classes,
-                    # "box_masks_full": box_masks_full_per_image,
+                    # "masks": padded_masks,
                     "box_masks": box_masks_per_image,
                     # "images_color_similarity": torch.cat(
                     #     [images_color_similarity for _ in range(len(targets_per_image))], dim=0
                     # )  # (image_gt_num, k*k-1, H/4, W/4)
+                    "left_bounds": left_bounds_per_image.float(),
+                    "right_bounds": right_bounds_per_image.float(),
+                    "top_bounds": top_bounds_per_image.float(),
+                    "bottom_bounds": bottom_bounds_per_image.float(),
                 }
             )
-        # m2 = torch.cuda.memory_allocated()
-        # print('m2 memory cost:', m2 / (1024 * 1024), 'MB\n')
         return new_targets
 
     def semantic_inference(self, mask_cls, mask_pred):

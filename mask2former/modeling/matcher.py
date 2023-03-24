@@ -294,140 +294,62 @@ class HungarianMatcherWeakSup(nn.Module):
         return "\n".join(lines)
 
 
-class HungarianMatcherMask(nn.Module):
-    """This class computes an assignment between the targets and the predictions of the network
-
-    For efficiency reasons, the targets don't include the no_object. Because of this, in general,
-    there are more predictions than targets. In this case, we do a 1-to-1 matching of the best predictions,
-    while the others are un-matched (and thus treated as non-objects).
+#############################################
+######### projection limited label ##########
+#############################################
+def batch_limited_label_dice_loss(inputs: torch.Tensor, targets: torch.Tensor):
     """
+    :param inputs: (Q*G, C)
+    :param targets: (Q*G, C)
+    :return: loss: (Q, G)
+    """
+    numerator = 2 * (inputs * targets).sum(-1)  # (Q*G)
+    denominator = inputs.sum(-1) + targets.sum(-1)  # (Q*G)
+    loss = 1 - (numerator + 1) / (denominator + 1)  # (Q*G)
+    return loss
 
-    def __init__(
-            self,
-            cost_class: float = 1,
-            cost_mask: float = 1,
-            cost_dice: float = 1,
-            num_points: int = 0,
-            target_type: str = "mask"
-    ):
-        """Creates the matcher
 
-        Params:
-            cost_class: This is the relative weight of the classification error in the matching cost
-            cost_mask: This is the relative weight of the focal loss of the binary mask in the matching cost
-            cost_dice: This is the relative weight of the dice loss of the binary mask in the matching cost
-        """
-        super().__init__()
-        self.cost_class = cost_class
-        self.cost_mask = cost_mask
-        self.cost_dice = cost_dice
+batch_limited_label_dice_loss_jit = torch.jit.script(
+    batch_limited_label_dice_loss
+)  # type: torch.jit.ScriptModule
 
-        assert cost_class != 0 or cost_mask != 0 or cost_dice != 0, "all costs cant be 0"
 
-        self.num_points = num_points
-        self.target_type = target_type
+def batch_axis_projection_limited_label(
+    out_mask,
+    tgt_boxmask,
+    tgt_first_bounds,
+    tgt_second_bounds,
+    axis=-1
+):
+    out_mask = out_mask.sigmoid()
 
-    @torch.no_grad()
-    def memory_efficient_forward(self, outputs, targets):
-        """More memory-friendly matching"""
-        bs, num_queries = outputs["pred_logits"].shape[:2]
+    Q = out_mask.shape[0]
+    G = tgt_boxmask.shape[0]
+    T = 1
+    C = T * tgt_first_bounds.shape[-1]
 
-        indices = []
+    # (Q, 1, H, W) -> (Q, 1, H or W)
+    out_mask_proj, proj_inds_axis = out_mask.max(dim=axis, keepdim=True)
+    # (Q, 1, H or W) -> (Q, C) -> (Q, C*G) -> (Q*G, C)
+    out_mask_proj = out_mask_proj.flatten(1).repeat(1, G).view(Q*G, C)
+    proj_inds_axis = proj_inds_axis.flatten(1).repeat(1, G).view(Q*G, C)
 
-        # Iterate through batch size
-        for b in range(bs):
-            out_prob = outputs["pred_logits"][b].softmax(-1)  # [num_queries, num_classes]
-            tgt_ids = targets[b]["labels"]
+    # (G, 1, H, W) -> (G, 1, H or W) -> (G, C) -> (Q*G, C)
+    tgt_boxmask_proj = tgt_boxmask.max(dim=axis, keepdim=True)[0].flatten(1).repeat(Q, 1)
 
-            # Compute the classification cost. Contrary to the loss, we don't use the NLL,
-            # but approximate it in 1 - proba[target class].
-            # The 1 is a constant that doesn't change the matching, it can be ommitted.
-            cost_class = -out_prob[:, tgt_ids]
+    # (G, 1, H or W) -> (G, C) -> (Q*G, C)
+    tgt_first_bounds = tgt_first_bounds.flatten(1).repeat(Q, 1)
+    tgt_second_bounds = tgt_second_bounds.flatten(1).repeat(Q, 1)
 
-            out_mask = outputs["pred_masks"][b]  # (num_query, H_pred, W_pred)
+    # bool, (Q*G, C)
+    flag_first = proj_inds_axis >= tgt_first_bounds
+    flag_second = proj_inds_axis < tgt_second_bounds
+    flag_proj = flag_first * flag_second  # (Q*G, C)
 
-            # gt masks are already padded when preparing target
-            if self.target_type == "mask":
-                tgt_mask = targets[b]["masks"].to(out_mask)
-            elif self.target_type == "box_mask":
-                tgt_mask = targets[b]["box_masks_full"].to(out_mask)
-            else:
-                raise Exception("Unknown target type !!!")
+    tgt_boxmask_proj *= flag_proj
 
-            out_mask = out_mask[:, None]  # (num_query, 1, H_pred, W_pred)
-            tgt_mask = tgt_mask[:, None]  # (num_gt, 1, H_pred, W_pred)
-
-            # all masks share the same set of points for efficient matching!
-            point_coords = torch.rand(1, self.num_points, 2, device=out_mask.device)
-            # get gt labels
-            tgt_mask = point_sample(
-                tgt_mask,
-                point_coords.repeat(tgt_mask.shape[0], 1, 1),
-                align_corners=False,
-            ).squeeze(1)  # (num_gt, 1, num_points) -> (num_gt, num_points)
-
-            out_mask = point_sample(
-                out_mask,
-                point_coords.repeat(out_mask.shape[0], 1, 1),
-                align_corners=False,
-            ).squeeze(1)  # (num_query, 1, num_points) -> (num_query, num_points)
-
-            with autocast(enabled=False):
-                out_mask = out_mask.float()
-                tgt_mask = tgt_mask.float()
-                # Compute the focal loss between masks
-                cost_mask = batch_sigmoid_ce_loss_jit(out_mask, tgt_mask)
-
-                # Compute the dice loss betwen masks
-                cost_dice = batch_dice_loss_jit(out_mask, tgt_mask)
-
-            # Final cost matrix
-            C = (
-                    self.cost_mask * cost_mask
-                    + self.cost_class * cost_class
-                    + self.cost_dice * cost_dice
-            )
-            C = C.reshape(num_queries, -1).cpu()
-
-            indices.append(linear_sum_assignment(C))
-
-        return [
-            (torch.as_tensor(i, dtype=torch.int64), torch.as_tensor(j, dtype=torch.int64))
-            for i, j in indices
-        ]
-
-    @torch.no_grad()
-    def forward(self, outputs, targets):
-        """Performs the matching
-
-        Params:
-            outputs: This is a dict that contains at least these entries:
-                 "pred_logits": Tensor of dim [batch_size, num_queries, num_classes] with the classification logits
-                 "pred_masks": Tensor of dim [batch_size, num_queries, H_pred, W_pred] with the predicted masks
-
-            targets: This is a list of targets (len(targets) = batch_size), where each target is a dict containing:
-                 "labels": Tensor of dim [num_target_boxes] (where num_target_boxes is the number of ground-truth
-                           objects in the target) containing the class labels
-                 "masks": Tensor of dim [num_target_boxes, H_gt, W_gt] containing the target masks
-
-        Returns:
-            A list of size batch_size, containing tuples of (index_i, index_j) where:
-                - index_i is the indices of the selected predictions (in order)
-                - index_j is the indices of the corresponding selected targets (in order)
-            For each batch element, it holds:
-                len(index_i) = len(index_j) = min(num_queries, num_target_boxes)
-        """
-        return self.memory_efficient_forward(outputs, targets)
-
-    def __repr__(self, _repr_indent=4):
-        head = "Matcher " + self.__class__.__name__
-        body = [
-            "cost_class: {}".format(self.cost_class),
-            "cost_mask: {}".format(self.cost_mask),
-            "cost_dice: {}".format(self.cost_dice),
-        ]
-        lines = [head] + [" " * _repr_indent + line for line in body]
-        return "\n".join(lines)
+    cost = batch_limited_label_dice_loss_jit(out_mask_proj, tgt_boxmask_proj).view(Q, G)
+    return cost
 
 
 class HungarianMatcherProjMask(nn.Module):
@@ -482,13 +404,30 @@ class HungarianMatcherProjMask(nn.Module):
 
             # gt masks are already padded when preparing target
             tgt_box_mask = targets[b]["box_masks"].to(out_mask)
+            tgt_left_bounds = targets[b]["left_bounds"].to(out_mask)
+            tgt_right_bounds = targets[b]["right_bounds"].to(out_mask)
+            tgt_top_bounds = targets[b]["top_bounds"].to(out_mask)
+            tgt_bottom_bounds = targets[b]["bottom_bounds"].to(out_mask)
 
             out_mask = out_mask[:, None]  # (num_query, 1, H_pred, W_pred)
-            tgt_box_mask = tgt_box_mask[:, None]  # (num_gt, 1, H_pred, W_pred)
+            tgt_boxmask = tgt_box_mask[:, None]  # (num_gt, 1, H_pred, W_pred)
+            tgt_left_bounds = tgt_left_bounds[:, None]  # (num_gt, 1, H_pred)
+            tgt_right_bounds = tgt_right_bounds[:, None]  # (num_gt, 1, H_pred)
+            tgt_top_bounds = tgt_top_bounds[:, None]  # (num_gt, 1, W_pred)
+            tgt_bottom_bounds = tgt_bottom_bounds[:, None]  # (num_gt, 1, W_pred)
 
             # Compute the dice loss between masks
-            cost_projection = calculate_axis_projection(out_mask, tgt_box_mask, 3) +  \
-                              calculate_axis_projection(out_mask, tgt_box_mask, 2)
+            # cost_projection = calculate_axis_projection(out_mask, tgt_boxmask, 3) +  \
+            #                   calculate_axis_projection(out_mask, tgt_boxmask, 2)
+
+            # projection limited label
+            cost_projection = \
+                batch_axis_projection_limited_label(
+                    out_mask, tgt_boxmask, tgt_left_bounds, tgt_right_bounds, axis=-1
+                ) + \
+                batch_axis_projection_limited_label(
+                    out_mask, tgt_boxmask, tgt_top_bounds, tgt_bottom_bounds, axis=-2
+                )
 
             # Final cost matrix
             C = (self.cost_class * cost_class + self.cost_projection * cost_projection)

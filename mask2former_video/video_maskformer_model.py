@@ -313,13 +313,22 @@ class VideoMaskFormer(nn.Module):
         gt_instances = []
         for targets_per_video in targets:
             _num_instance = len(targets_per_video["instances"][0])
-            mask_shape = [_num_instance, self.num_frames, h_pad, w_pad]
 
-            gt_box_masks_full_per_video = torch.zeros(mask_shape, dtype=torch.float32, device=self.device)
+            mask_shape = [_num_instance, self.num_frames, h_pad, w_pad]
+            gt_boxmasks_full_per_video = torch.zeros(mask_shape, dtype=torch.float32, device=self.device)
+            # gt_boxmasks_limited_x_full_per_video = torch.zeros(mask_shape, dtype=torch.float32, device=self.device)
+            # gt_boxmasks_limited_y_full_per_video = torch.zeros(mask_shape, dtype=torch.float32, device=self.device)
+
+            x_bound_shape = [_num_instance, self.num_frames, h_pad]
+            left_bounds_full_per_video = torch.zeros(x_bound_shape, dtype=torch.float32, device=self.device)
+            right_bounds_full_per_video = torch.zeros(x_bound_shape, dtype=torch.float32, device=self.device)
+
+            y_bound_shape = [_num_instance, self.num_frames, w_pad]
+            top_bounds_full_per_video = torch.zeros(y_bound_shape, dtype=torch.float32, device=self.device)
+            bottom_bounds_full_per_video = torch.zeros(y_bound_shape, dtype=torch.float32, device=self.device)
 
             # rectangle gt mask from boxes for mask projection loss
             # TODO: add images_color_similarity for pairwise loss
-            box_mask_per_video = []
             gt_ids_per_video = []
             for f_i, targets_per_frame in enumerate(targets_per_video["instances"]):
                 targets_per_frame = targets_per_frame.to(self.device)
@@ -328,22 +337,58 @@ class VideoMaskFormer(nn.Module):
                 # generate rectangle gt masks from boxes of shape (N, 4) in abs coordinates
                 if len(targets_per_frame) > 0:
                     gt_boxes = [gt_box.squeeze() for gt_box in targets_per_frame.gt_boxes.tensor.split(1)]
-                    box_masks_full_per_frame = []
-                    box_masks_per_frame = []
                     for ins_i, gt_box in enumerate(gt_boxes):
-                        gt_box_masks_full_per_video[
+                        gt_boxmasks_full_per_video[
                             ins_i, f_i, int(gt_box[1]):int(gt_box[3] + 1), int(gt_box[0]):int(gt_box[2] + 1)
                         ] = 1.0
 
-                    # box_mask_full = torch.zeros(mask_shape[2:], device=self.device)  # (h_pad, w_pad)
-                    # box_mask_full[int(gt_box[1]):int(gt_box[3] + 1), int(gt_box[0]):int(gt_box[2] + 1)] = 1.0
-                    # box_mask = box_mask_full[start::stride, start::stride]  # (h_pad/4, w_pad/4)
-                    # box_masks_per_frame.append(box_mask)
+                        # # limited x for y projection
+                        # gt_boxmasks_limited_x_full_per_video[
+                        #     ins_i, f_i, :int(gt_box[1]), :
+                        # ] = 1.0  # top
+                        # gt_boxmasks_limited_x_full_per_video[
+                        #     ins_i, f_i, int(gt_box[1]):int(gt_box[3] + 1), int(gt_box[0]):int(gt_box[2] + 1)
+                        # ] = 1.0  # middle
+                        # gt_boxmasks_limited_x_full_per_video[
+                        #     ins_i, f_i, int(gt_box[3] + 1):, :
+                        # ] = 1.0  # bottom
+                        #
+                        # # limited y for x projection
+                        # gt_boxmasks_limited_y_full_per_video[
+                        #     ins_i, f_i, :, :int(gt_box[0])
+                        # ] = 1.0  # left
+                        # gt_boxmasks_limited_y_full_per_video[
+                        #     ins_i, f_i, int(gt_box[1]):int(gt_box[3] + 1), int(gt_box[0]):int(gt_box[2] + 1)
+                        # ] = 1.0  # middle
+                        # gt_boxmasks_limited_y_full_per_video[
+                        #     ins_i, f_i, :, int(gt_box[2] + 1):
+                        # ] = 1.0  # right
 
-                # (N, h_pad/4, w_pad/4)->(N, 1, h_pad/4, w_pad/4)
-                # box_mask_per_video.append(torch.stack(box_masks_per_frame, dim=0)[:, None, :, :])
+                        left_bounds_full_per_video[ins_i, f_i, :int(gt_box[1])] = 0.
+                        left_bounds_full_per_video[ins_i, f_i, int(gt_box[1]):int(gt_box[3] + 1)] = int(gt_box[0])
+                        left_bounds_full_per_video[ins_i, f_i, int(gt_box[3] + 1):] = 0.
 
-            gt_box_masks_per_video = gt_box_masks_full_per_video[:, :, start::stride, start::stride]  # (num_ins, T, h_pad/4, w_pad/4)
+                        right_bounds_full_per_video[ins_i, f_i, :int(gt_box[1])] = w_pad
+                        right_bounds_full_per_video[ins_i, f_i, int(gt_box[1]):int(gt_box[3] + 1)] = int(gt_box[2] + 1)
+                        right_bounds_full_per_video[ins_i, f_i, int(gt_box[3] + 1):] = w_pad
+
+                        top_bounds_full_per_video[ins_i, f_i, :int(gt_box[0])] = 0.
+                        top_bounds_full_per_video[ins_i, f_i, int(gt_box[0]):int(gt_box[2] + 1)] = int(gt_box[1])
+                        top_bounds_full_per_video[ins_i, f_i, int(gt_box[2] + 1):] = 0.
+
+                        bottom_bounds_full_per_video[ins_i, f_i, :int(gt_box[0])] = h_pad
+                        bottom_bounds_full_per_video[ins_i, f_i, int(gt_box[0]):int(gt_box[2] + 1)] = int(gt_box[3] + 1)
+                        bottom_bounds_full_per_video[ins_i, f_i, int(gt_box[2] + 1):] = h_pad
+
+            # (num_ins, T, h_pad/4, w_pad/4)
+            gt_boxmasks_per_video = gt_boxmasks_full_per_video[:, :, start::stride, start::stride]
+            # gt_boxmasks_limited_x_per_video = gt_boxmasks_limited_x_full_per_video[:, :, start::stride, start::stride]
+            # gt_boxmasks_limited_y_per_video = gt_boxmasks_limited_y_full_per_video[:, :, start::stride, start::stride]
+            left_bounds_per_video = left_bounds_full_per_video[:, :, start::stride] / stride
+            right_bounds_per_video = right_bounds_full_per_video[:, :, start::stride] / stride
+            top_bounds_per_video = top_bounds_full_per_video[:, :, start::stride] / stride
+            bottom_bounds_per_video = bottom_bounds_full_per_video[:, :, start::stride] / stride
+
             gt_ids_per_video = torch.cat(gt_ids_per_video, dim=1)  # (N, num_frame)
             valid_idx = (gt_ids_per_video != -1).any(dim=-1)  # (num_ins,), 别取到再所有帧上都是空的gt
 
@@ -353,7 +398,13 @@ class VideoMaskFormer(nn.Module):
             gt_instances.append(
                 {
                     "labels": gt_classes_per_video, "ids": gt_ids_per_video,
-                    "box_masks": gt_box_masks_per_video[valid_idx].float()
+                    "box_masks": gt_boxmasks_per_video[valid_idx].float(),
+                    # "box_masks_limited_x": gt_boxmasks_limited_x_per_video[valid_idx].float(),
+                    # "box_masks_limited_y": gt_boxmasks_limited_y_per_video[valid_idx].float()
+                    "left_bounds": left_bounds_per_video[valid_idx].float(),
+                    "right_bounds": right_bounds_per_video[valid_idx].float(),
+                    "top_bounds": top_bounds_per_video[valid_idx].float(),
+                    "bottom_bounds": bottom_bounds_per_video[valid_idx].float(),
                 }
             )
         return gt_instances

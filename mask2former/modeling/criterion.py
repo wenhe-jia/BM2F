@@ -277,12 +277,6 @@ class SetCriterionWeakSup(nn.Module):
         target_box_masks = target_box_masks.to(src_masks)
         target_box_masks = target_box_masks[tgt_idx]
 
-        # torch.cuda.synchronize()
-        # m2 = torch.cuda.memory_allocated()
-        # print('masks memory cost:', (m2 - m1) / (1024 * 1024), 'MB')
-        # mmax = torch.cuda.max_memory_allocated()
-        # print('masks max memory cost:', mmax / (1024 * 1024), 'MB')
-
         similarities = [t['images_color_similarity'] for t in targets]  # [(N, k*k-1, H, W)] * n
         target_similarities, valid = nested_tensor_from_tensor_list(similarities).decompose()
         target_similarities = target_similarities.to(src_masks)
@@ -686,38 +680,98 @@ class SetCriterionProjection(nn.Module):
         src_masks = src_masks[src_idx]
 
         # masks: [(num_gt_2, H, W), (num_gt_1, H, W), ...]
-        masks = [t["box_masks"] for t in targets]
+        box_masks = [t["box_masks"] for t in targets]
+
         # TODO use valid to mask invalid areas due to padding in loss
         # target_masks: (B, max_num_gt, H, W)
-        target_masks, valid = nested_tensor_from_tensor_list(masks).decompose()
-        del masks
-        target_masks = target_masks.to(src_masks)
-        target_masks = target_masks[tgt_idx]  # (num_gt-1+num_gt_2+..., H, W)
+        target_boxmasks, valid = nested_tensor_from_tensor_list(box_masks).decompose()
+        target_boxmasks = target_boxmasks.to(src_masks)
+        target_boxmasks = target_boxmasks[tgt_idx]  # (num_gt-1+num_gt_2+..., H, W)
 
-        # No need to upsample predictions as we are using normalized coordinates :)
-        # N x 1 x H/4 x W/4
+        left_bounds = [t["left_bounds"] for t in targets]
+        target_left_bounds, valid = nested_tensor_from_tensor_list(left_bounds).decompose()
+        target_left_bounds = target_left_bounds.to(src_masks)
+        target_left_bounds = target_left_bounds[tgt_idx]
+
+        right_bounds = [t["right_bounds"] for t in targets]
+        target_right_bounds, valid = nested_tensor_from_tensor_list(right_bounds).decompose()
+        target_right_bounds = target_right_bounds.to(src_masks)
+        target_right_bounds = target_right_bounds[tgt_idx]
+
+        top_bounds = [t["top_bounds"] for t in targets]
+        target_top_bounds, valid = nested_tensor_from_tensor_list(top_bounds).decompose()
+        target_top_bounds = target_top_bounds.to(src_masks)
+        target_top_bounds = target_top_bounds[tgt_idx]
+
+        bottom_bounds = [t["bottom_bounds"] for t in targets]
+        target_bottom_bounds, valid = nested_tensor_from_tensor_list(bottom_bounds).decompose()
+        target_bottom_bounds = target_bottom_bounds.to(src_masks)
+        target_bottom_bounds = target_bottom_bounds[tgt_idx]
+
+        # (N, H, W) -> (N, 1, H, W)
         src_masks = src_masks[:, None]
+        target_boxmasks = target_boxmasks[:, None]
+        # (N, H or W) -> (NH or NW)
+        target_left_bounds = target_left_bounds.flatten()
+        target_right_bounds = target_right_bounds.flatten()
+        target_top_bounds = target_top_bounds.flatten()
+        target_bottom_bounds = target_bottom_bounds.flatten()
 
-        # Prepare data for projection loss, project mask to x & y axis
-        # masks_x: (num_ins, 1, H_pad/4, 1)->(num_ins, H_pad/4)
-        # masks_y: (num_ins, 1, 1, W_pad/4)->(num_ins, W_pad/4)
-        src_masks_x = src_masks.max(dim=3, keepdim=True)[0].flatten(1, 3)
-        src_masks_y = src_masks.max(dim=2, keepdim=True)[0].flatten(1, 3)
-        del src_masks
+        """
+            bellow is for original projection loss
+        """
+        # src_masks_x = src_masks.max(dim=3, keepdim=True)[0].flatten(1, 3)
+        # src_masks_y = src_masks.max(dim=2, keepdim=True)[0].flatten(1, 3)
+        #
+        # with torch.no_grad():
+        #     target_boxmasks_x = target_boxmasks.max(dim=3, keepdim=True)[0].flatten(1, 3)
+        #     target_boxmasks_y = target_boxmasks.max(dim=2, keepdim=True)[0].flatten(1, 3)
+        #
+        # losses = {
+        #     "loss_mask_projection": projection_dice_loss_jit(
+        #         src_masks_x, target_boxmasks_x, src_masks_y, target_boxmasks_y, num_masks
+        #     )
+        # }
 
-        target_masks = target_masks[:, None]
+        """
+            bellow is for projection limited label loss
+        """
+        N = src_masks.shape[0]
+        H = src_masks.shape[2]
+        W = src_masks.shape[3]
+
+        src_masks_y, max_inds_x = src_masks.max(dim=3, keepdim=True)  # (N, 1, H, 1), (N, 1, H, 1)
+        src_masks_x, max_inds_y = src_masks.max(dim=2, keepdim=True)  # (N, 1, 1, W), (N, 1, 1, W)
+
+        src_masks_y = src_masks_y.flatten(1)  # (N, H)
+        src_masks_x = src_masks_x.flatten(1)  # (N, W)
+        max_inds_x = max_inds_x.flatten()  # (NW)
+        max_inds_y = max_inds_y.flatten()  # (NH)
+
         with torch.no_grad():
-            target_masks_x = target_masks.max(dim=3, keepdim=True)[0].flatten(1, 3)
-            target_masks_y = target_masks.max(dim=2, keepdim=True)[0].flatten(1, 3)
-        del target_masks
+            flag_l = max_inds_x >= target_left_bounds
+            flag_r = max_inds_x < target_right_bounds
+            flag_y = (flag_l * flag_r).view(N, H)
+
+            flag_t = max_inds_y >= target_top_bounds
+            flag_b = max_inds_y < target_bottom_bounds
+            flag_x = (flag_t * flag_b).view(N, W)
+
+            target_boxmasks_y = target_boxmasks.max(dim=3, keepdim=True)[0].flatten(1) * flag_y  # (N, W)
+            target_boxmasks_x = target_boxmasks.max(dim=2, keepdim=True)[0].flatten(1) * flag_x  # (N, H)
+
         losses = {
             "loss_mask_projection": projection_dice_loss_jit(
-                src_masks_x, target_masks_x, src_masks_y, target_masks_y, num_masks
+                src_masks_x, target_boxmasks_x,
+                src_masks_y, target_boxmasks_y,
+                num_masks
             )
         }
 
-        # del src_masks
-        # del target_masks
+
+        del src_masks_y, src_masks_x
+        del src_masks
+        del target_boxmasks
         return losses
 
     def _get_src_permutation_idx(self, indices):

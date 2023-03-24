@@ -229,96 +229,125 @@ class VideoSetCriterionProjMask(nn.Module):
         src_masks = outputs["pred_masks"]
         src_masks = src_masks[src_idx].sigmoid()  # need to sigmoid
         # Modified to handle video
-        target_box_masks = torch.cat([t['box_masks'][i] for t, (_, i) in zip(targets, indices)]).to(src_masks)
-        # src_masks: (N, T, H_pad/4, W_pad/4)
-        # target_masks: (N, T, H_pad/4, W_pad/4)
+        target_boxmasks = torch.cat(
+            [t['box_masks'][i] for t, (_, i) in zip(targets, indices)]
+        ).to(src_masks)
+        # target_boxmasks_limited_x = torch.cat(
+        #     [t['box_masks_limited_x'][i] for t, (_, i) in zip(targets, indices)]
+        # ).to(src_masks)
+        # target_boxmasks_limited_y = torch.cat(
+        #     [t['box_masks_limited_y'][i] for t, (_, i) in zip(targets, indices)]
+        # ).to(src_masks)
+        target_left_bounds = torch.cat(
+            [t['left_bounds'][i] for t, (_, i) in zip(targets, indices)]
+        ).to(src_masks)
+        target_right_bounds = torch.cat(
+            [t['right_bounds'][i] for t, (_, i) in zip(targets, indices)]
+        ).to(src_masks)
+        target_top_bounds = torch.cat(
+            [t['top_bounds'][i] for t, (_, i) in zip(targets, indices)]
+        ).to(src_masks)
+        target_bottom_bounds = torch.cat(
+            [t['bottom_bounds'][i] for t, (_, i) in zip(targets, indices)]
+        ).to(src_masks)
 
-        # (N, T, H_pad/4, W_pad/4)->(NT, 1, H_pad/4, W_pad/4)
+        # (N, T, H_pad/4, W_pad/4) -> (NT, 1, H_pad/4, W_pad/4)
         src_masks = src_masks.flatten(0, 1)[:, None]
-        target_box_masks = target_box_masks.flatten(0, 1)[:, None]
+        target_boxmasks = target_boxmasks.flatten(0, 1)[:, None]
+        # target_boxmasks_limited_x = target_boxmasks_limited_x.flatten(0, 1)[:, None]
+        # target_boxmasks_limited_y = target_boxmasks_limited_y.flatten(0, 1)[:, None]
+        target_left_bounds = target_left_bounds.flatten()  # (NTH)
+        target_right_bounds = target_right_bounds.flatten()  # (NTH)
+        target_top_bounds = target_top_bounds.flatten()  # (NTW)
+        target_bottom_bounds = target_bottom_bounds.flatten()  # (NTW)
 
         if src_idx[0].shape[0] > 0:
             """
-            bellow is for original projection loss
+                bellow is for original projection loss
             """
             # project mask to x & y axis
             # masks_x: (num_ins, T, H_pad/4, W_pad/4)->(num_ins, T, H_pad, 1)->(num_ins, T*H_pad)
             # masks_y: (num_ins, T, H_pad/4, W_pad/4)->(num_ins, T, 1, W_pad)->(num_ins, T*W_pad)
             # max projection
 
-            # src_masks_x = src_masks.max(dim=3, keepdim=True)[0].flatten(1, 3)
-            # src_masks_y = src_masks.max(dim=2, keepdim=True)[0].flatten(1, 3)
+            # src_masks_y = src_masks.max(dim=3, keepdim=True)[0].flatten(1)
+            # src_masks_x = src_masks.max(dim=2, keepdim=True)[0].flatten(1)
             #
             # with torch.no_grad():
             #     # max projection
-            #     target_box_masks_x = target_box_masks.max(dim=3, keepdim=True)[0].flatten(1, 3)
-            #     target_box_masks_y = target_box_masks.max(dim=2, keepdim=True)[0].flatten(1, 3)
+            #     target_boxmasks_y = target_boxmasks.max(dim=3, keepdim=True)[0].flatten(1)
+            #     target_boxmasks_x = target_boxmasks.max(dim=2, keepdim=True)[0].flatten(1)
             #
             # losses = {
             #     "loss_mask_projection": projection2D_dice_loss_jit(
-            #         src_masks_x, target_box_masks_x,
-            #         src_masks_y, target_box_masks_y,
+            #         src_masks_x, target_boxmasks_x,
+            #         src_masks_y, target_boxmasks_y,
             #         num_masks
             #     )
             # }
             #
             # del src_masks_x, src_masks_y
             # del target_box_masks_x, target_box_masks_y
-
             """
-            bellow is for foreground / background separate loss
+                bellow is for projection limited sample loss
             """
-            # src_masks_box_fg = src_masks * target_box_masks
-            # src_masks_box_bg = ((1. - src_masks) * (1. - target_box_masks)) + target_box_masks
+            # src_masks_limited_x = src_masks * target_boxmasks_limited_x
+            # src_masks_limited_y = src_masks * target_boxmasks_limited_y
             #
-            # src_masks_x_fg = src_masks_box_fg.max(dim=3, keepdim=True)[0].flatten(1, 3)
-            # src_masks_y_fg = src_masks_box_fg.max(dim=2, keepdim=True)[0].flatten(1, 3)
-            # src_masks_x_bg = src_masks_box_bg.min(dim=3, keepdim=True)[0].flatten(1, 3)
-            # src_masks_y_bg = src_masks_box_bg.min(dim=2, keepdim=True)[0].flatten(1, 3)
+            # src_masks_y = src_masks_limited_x.max(dim=-1, keepdim=True)[0].flatten(1)
+            # src_masks_x = src_masks_limited_y.max(dim=-2, keepdim=True)[0].flatten(1)
             #
             # with torch.no_grad():
-            #     target_box_masks_x_fg = target_box_masks.max(dim=3, keepdim=True)[0].flatten(1, 3)
-            #     target_box_masks_y_fg = target_box_masks.max(dim=2, keepdim=True)[0].flatten(1, 3)
-            #     target_box_masks_x_bg = (1. - target_box_masks).max(dim=3, keepdim=True)[0].flatten(1, 3)
-            #     target_box_masks_y_bg = (1. - target_box_masks).max(dim=2, keepdim=True)[0].flatten(1, 3)
+            #     # max projection
+            #     target_boxmasks_x = target_boxmasks.max(dim=2, keepdim=True)[0].flatten(1)
+            #     target_boxmasks_y = target_boxmasks.max(dim=3, keepdim=True)[0].flatten(1)
             #
             # losses = {
-            #     "loss_mask_projection_fg": projection2D_dice_loss_jit(
-            #         src_masks_x_fg, target_box_masks_x_fg,
-            #         src_masks_y_fg, target_box_masks_y_fg,
+            #     "loss_mask_projection": projection2D_dice_loss_jit(
+            #         src_masks_x, target_boxmasks_x,
+            #         src_masks_y, target_boxmasks_y,
             #         num_masks
-            #     ),
-            #     "loss_mask_projection_bg": projection2D_dice_loss_jit(
-            #         src_masks_x_bg, target_box_masks_x_bg,
-            #         src_masks_y_bg, target_box_masks_y_bg,
-            #         num_masks
-            #     ),
+            #     )
             # }
-            #
-            # del src_masks_box_fg, src_masks_box_bg
-            # del src_masks_x_fg, src_masks_y_fg, src_masks_x_bg, src_masks_y_bg
-            # del target_box_masks_x_fg, target_box_masks_y_fg, target_box_masks_x_bg, target_box_masks_y_bg
 
             """
-            bellow is for limited projection loss
+                bellow is for projection limited label loss
             """
-            src_masks_y, src_masks_x = self._get_limited_projections(src_masks, target_box_masks)
+            NT = src_masks.shape[0]
+            H = src_masks.shape[2]
+            W = src_masks.shape[3]
+
+            src_masks_y, max_inds_x = src_masks.max(dim=3, keepdim=True)  # (NT, 1, H, 1), (NT, 1, H, 1)
+            src_masks_x, max_inds_y = src_masks.max(dim=2, keepdim=True)  # (NT, 1, 1, W), (NT, 1, 1, W)
+
+            src_masks_y = src_masks_y.flatten(1)  # (NT, H)
+            src_masks_x = src_masks_x.flatten(1)  # (NT, W)
+            max_inds_x = max_inds_x.flatten()  # (NTW)
+            max_inds_y = max_inds_y.flatten()  # (NTH)
 
             with torch.no_grad():
-                # max projection
-                target_box_masks_x = target_box_masks.max(dim=2, keepdim=True)[0].flatten(1, 3)
-                target_box_masks_y = target_box_masks.max(dim=3, keepdim=True)[0].flatten(1, 3)
+                flag_l = max_inds_x >= target_left_bounds
+                flag_r = max_inds_x < target_right_bounds
+                flag_y = (flag_l * flag_r).view(NT, H)
+
+                flag_t = max_inds_y >= target_top_bounds
+                flag_b = max_inds_y < target_bottom_bounds
+                flag_x = (flag_t * flag_b).view(NT, W)
+
+                target_boxmasks_y = target_boxmasks.max(dim=3, keepdim=True)[0].flatten(1) * flag_y  # (NT, W)
+                target_boxmasks_x = target_boxmasks.max(dim=2, keepdim=True)[0].flatten(1) * flag_x  # (NT, H)
 
             losses = {
                 "loss_mask_projection": projection2D_dice_loss_jit(
-                    src_masks_x, target_box_masks_x,
-                    src_masks_y, target_box_masks_y,
+                    src_masks_x, target_boxmasks_x,
+                    src_masks_y, target_boxmasks_y,
                     num_masks
                 )
             }
 
             del src_masks_x, src_masks_y
-            del target_box_masks_x, target_box_masks_y
+            # del src_masks_limited_x, src_masks_limited_y
+            del target_boxmasks_x, target_boxmasks_y
 
         else:
             """
@@ -328,20 +357,11 @@ class VideoSetCriterionProjMask(nn.Module):
                 "loss_mask_projection": torch.tensor([0], dtype=torch.float32, device=src_masks.device),
             }
 
-            """
-            bellow is for foreground / background separate loss
-            """
-            # losses = {
-            #     "loss_mask_projection_fg": torch.tensor([0], dtype=torch.float32, device=src_masks.device),
-            #     "loss_mask_projection_bg": torch.tensor([0], dtype=torch.float32, device=src_masks.device)
-            # }
-
-
         del src_masks
-        del target_box_masks
+        del target_boxmasks
         return losses
 
-    def _get_limited_projections(self, src_masks, tgt_box_masks):
+    def _get_limited_projections_loop(self, src_masks, tgt_box_masks):
         tgt_boxes = BitMasks(tgt_box_masks.squeeze()).get_bounding_boxes().tensor.to(dtype=torch.int64)  # (N, 4) in BoxMode:XYXY
         src_masks_fg = src_masks * tgt_box_masks
 
