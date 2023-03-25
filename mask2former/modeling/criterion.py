@@ -54,7 +54,7 @@ def projection_dice_loss(
 
     assert inputs_x.shape[0] == targets_x.shape[0]
     assert inputs_y.shape[0] == targets_y.shape[0]
-    eps = 1e-5
+    eps = 1e-3
 
     inputs_x = inputs_x.sigmoid()
     inputs_y = inputs_y.sigmoid()
@@ -796,7 +796,7 @@ class SetCriterionProjection(nn.Module):
         return loss_map[loss](outputs, targets, indices, num_masks)
 
     @torch.no_grad()
-    def update_targets(self, src_probs_per_batch, targets_per_batch, indices_per_batch, pix_thr=0.5):
+    def update_targets(self, src_probs_per_batch, targets_per_batch, indices_per_batch, pix_thr=0.3, overlap_thr=0.0):
         """
         indices_curr_lvl: [(tensor(G,), tensor(G,))] x num_img
         """
@@ -818,29 +818,26 @@ class SetCriterionProjection(nn.Module):
             new_top_bnounds = torch.zeros_like(top_bounds)
             new_bottom_bounds = torch.zeros_like(bottom_bounds)
 
-            # print('indice:', indice)
-            # print('src_probs: ', src_probs.shape)
-            # print('box_masks: ', box_masks.shape)
-            # print('left_bounds: ', left_bounds.shape)
-            # print('right_bounds: ', right_bounds.shape)
-            # print('top_bounds: ', top_bounds.shape)
-            # print('bottom_bounds: ', bottom_bounds.shape)
-
-
             for src_idx, tgt_idx in zip(indice[0], indice[1]):
-                src_mask = src_probs[src_idx].sigmoid() >= pix_thr
-                box_mask = box_masks[tgt_idx]
+                new_box_mask = (src_probs[src_idx].sigmoid() >= pix_thr) * box_masks[tgt_idx]
 
-                new_box_masks[tgt_idx] = src_mask * box_mask
+                if new_box_masks[tgt_idx].sum() >= overlap_thr:
+                    new_box_masks[tgt_idx] = new_box_mask
 
-                # bounds for y projection
-                new_left_bounds[tgt_idx] = torch.argmax(new_box_masks[tgt_idx], dim=1)
-                new_right_bounds[tgt_idx] = new_box_masks[tgt_idx].shape[1] - \
-                                            torch.argmax(new_box_masks[tgt_idx].flip(1), dim=1)
-                # bounds for x projection
-                new_top_bnounds[tgt_idx] = torch.argmax(new_box_masks[tgt_idx], dim=0)
-                new_bottom_bounds[tgt_idx] = new_box_masks[tgt_idx].shape[0] - \
-                                             torch.argmax(new_box_masks[tgt_idx].flip(0), dim=0)
+                    # bounds for y projection
+                    new_left_bounds[tgt_idx] = torch.argmax(new_box_masks[tgt_idx], dim=1)
+                    new_right_bounds[tgt_idx] = new_box_masks[tgt_idx].shape[1] - \
+                                                torch.argmax(new_box_masks[tgt_idx].flip(1), dim=1)
+                    # bounds for x projection
+                    new_top_bnounds[tgt_idx] = torch.argmax(new_box_masks[tgt_idx], dim=0)
+                    new_bottom_bounds[tgt_idx] = new_box_masks[tgt_idx].shape[0] - \
+                                                 torch.argmax(new_box_masks[tgt_idx].flip(0), dim=0)
+                else:
+                    new_box_masks[tgt_idx] = box_masks[tgt_idx]
+                    new_left_bounds[tgt_idx] = left_bounds[tgt_idx]
+                    new_right_bounds[tgt_idx] = right_bounds[tgt_idx]
+                    new_top_bnounds[tgt_idx] = top_bounds[tgt_idx]
+                    new_bottom_bounds[tgt_idx] = bottom_bounds[tgt_idx]
 
             targets["box_masks"] = new_box_masks
             targets["left_bounds"] = new_left_bounds
@@ -872,7 +869,12 @@ class SetCriterionProjection(nn.Module):
 
             # Compute all the requested losses
             losses = {}
-
+            
+            # pix_thrs = [0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10]
+            # pix_thrs = [0.30, 0.30, 0.30, 0.30, 0.30, 0.30, 0.30, 0.30, 0.30]
+            # pix_thrs = [0.50, 0.50, 0.50, 0.50, 0.50, 0.50, 0.50, 0.50, 0.50]
+            pix_thrs = [0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50]
+            
             # compute loss of auxiliary decoder layer
             # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
             if "aux_outputs" in outputs:
@@ -883,7 +885,7 @@ class SetCriterionProjection(nn.Module):
                         l_dict = {k + f"_{i}": v for k, v in l_dict.items()}
                         losses.update(l_dict)
                     # update targets after curr lvl loss calculation
-                    targets = self.update_targets(aux_outputs, targets, indices)
+                    targets = self.update_targets(aux_outputs, targets, indices, pix_thr=pix_thrs[i])
 
             # compute los of final decoder layer
             outputs_without_aux = {k: v for k, v in outputs.items() if k != "aux_outputs"}
