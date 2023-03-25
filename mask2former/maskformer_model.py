@@ -439,11 +439,11 @@ class MaskFormer(nn.Module):
             # )  # (1, k*k-1, H/4, W/4)
 
             ###### for progressive projection upper bounds with gt_mask #####
-            gt_masks = targets_per_image.gt_masks
-            padded_masks = torch.zeros(
-                (gt_masks.shape[0], h_pad, w_pad), dtype=gt_masks.dtype, device=gt_masks.device
-            )
-            padded_masks[:, : gt_masks.shape[1], : gt_masks.shape[2]] = gt_masks
+            # gt_masks = targets_per_image.gt_masks
+            # padded_masks = torch.zeros(
+            #     (gt_masks.shape[0], h_pad, w_pad), dtype=gt_masks.dtype, device=gt_masks.device
+            # )
+            # padded_masks[:, : gt_masks.shape[1], : gt_masks.shape[2]] = gt_masks
 
             # gt box mask
             gt_boxes = targets_per_image.gt_boxes.tensor  # (N, 4)
@@ -489,15 +489,15 @@ class MaskFormer(nn.Module):
                     # bottom_bounds_full_per_image[ins_i, int(gt_box[2] + 1):] = h_pad
 
                     ###### for progressive projection upper bounds with gt_mask #####
-                    padded_gt_mask = padded_masks[ins_i].int()  # (H, W)
+                    gt_mask = box_masks_full_per_image[ins_i].int()  # (H, W)
                     # bounds for y projection
-                    left_bounds_full_per_image[ins_i] = torch.argmax(padded_gt_mask, dim=1)
-                    right_bounds_full_per_image[ins_i] = padded_gt_mask.shape[1] - \
-                                                         torch.argmax(padded_gt_mask.flip(1), dim=1)
+                    left_bounds_full_per_image[ins_i] = torch.argmax(gt_mask, dim=1)
+                    right_bounds_full_per_image[ins_i] = gt_mask.shape[1] - \
+                                                         torch.argmax(gt_mask.flip(1), dim=1)
                     # bounds for x projection
-                    top_bounds_full_per_image[ins_i] = torch.argmax(padded_gt_mask, dim=0)
-                    bottom_bounds_full_per_image[ins_i] = padded_gt_mask.shape[0] - \
-                                                          torch.argmax(padded_gt_mask.flip(0), dim=0)
+                    top_bounds_full_per_image[ins_i] = torch.argmax(gt_mask, dim=0)
+                    bottom_bounds_full_per_image[ins_i] = gt_mask.shape[0] - \
+                                                          torch.argmax(gt_mask.flip(0), dim=0)
 
             box_masks_per_image = box_masks_full_per_image[:, start::stride, start::stride]
             left_bounds_per_image = left_bounds_full_per_image[:, start::stride] / stride

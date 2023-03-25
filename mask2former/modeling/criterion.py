@@ -396,6 +396,7 @@ class SetCriterionWeakSup(nn.Module):
                       The expected keys in each dict depends on the losses applied, see each loss' doc
         """
         self._iter += 1
+
         outputs_without_aux = {k: v for k, v in outputs.items() if k != "aux_outputs"}
 
         # Retrieve the matching between the outputs of the last layer and the targets
@@ -794,6 +795,62 @@ class SetCriterionProjection(nn.Module):
         assert loss in loss_map, f"do you really want to compute {loss} loss?"
         return loss_map[loss](outputs, targets, indices, num_masks)
 
+    @torch.no_grad()
+    def update_targets(self, src_probs_per_batch, targets_per_batch, indices_per_batch, pix_thr=0.5):
+        """
+        indices_curr_lvl: [(tensor(G,), tensor(G,))] x num_img
+        """
+        src_probs_per_batch = src_probs_per_batch["pred_masks"]  # (Q, H, W) x B
+        B = src_probs_per_batch.shape[0]
+        src_probs_per_batch = src_probs_per_batch.split(B, 0)[0]
+
+        new_targets = []
+        for indice, src_probs, targets in zip(indices_per_batch, src_probs_per_batch, targets_per_batch):
+            box_masks = targets["box_masks"]
+            left_bounds = targets["left_bounds"]
+            right_bounds = targets["right_bounds"]
+            top_bounds = targets["top_bounds"]
+            bottom_bounds = targets["bottom_bounds"]
+
+            new_box_masks = torch.zeros_like(box_masks)
+            new_left_bounds = torch.zeros_like(left_bounds)
+            new_right_bounds = torch.zeros_like(right_bounds)
+            new_top_bnounds = torch.zeros_like(top_bounds)
+            new_bottom_bounds = torch.zeros_like(bottom_bounds)
+
+            # print('indice:', indice)
+            # print('src_probs: ', src_probs.shape)
+            # print('box_masks: ', box_masks.shape)
+            # print('left_bounds: ', left_bounds.shape)
+            # print('right_bounds: ', right_bounds.shape)
+            # print('top_bounds: ', top_bounds.shape)
+            # print('bottom_bounds: ', bottom_bounds.shape)
+
+
+            for src_idx, tgt_idx in zip(indice[0], indice[1]):
+                src_mask = src_probs[src_idx].sigmoid() >= pix_thr
+                box_mask = box_masks[tgt_idx]
+
+                new_box_masks[tgt_idx] = src_mask * box_mask
+
+                # bounds for y projection
+                new_left_bounds[tgt_idx] = torch.argmax(new_box_masks[tgt_idx], dim=1)
+                new_right_bounds[tgt_idx] = new_box_masks[tgt_idx].shape[1] - \
+                                            torch.argmax(new_box_masks[tgt_idx].flip(1), dim=1)
+                # bounds for x projection
+                new_top_bnounds[tgt_idx] = torch.argmax(new_box_masks[tgt_idx], dim=0)
+                new_bottom_bounds[tgt_idx] = new_box_masks[tgt_idx].shape[0] - \
+                                             torch.argmax(new_box_masks[tgt_idx].flip(0), dim=0)
+
+            targets["box_masks"] = new_box_masks
+            targets["left_bounds"] = new_left_bounds
+            targets["right_bounds"] = new_right_bounds
+            targets["top_bounds"] = new_top_bnounds
+            targets["bottom_bounds"] = new_bottom_bounds
+
+            new_targets.append(targets)
+        return new_targets
+
     def forward(self, outputs, targets):
         """This performs the loss computation.
         Parameters:
@@ -801,33 +858,68 @@ class SetCriterionProjection(nn.Module):
              targets: list of dicts, such that len(targets) == batch_size.
                       The expected keys in each dict depends on the losses applied, see each loss' doc
         """
-        outputs_without_aux = {k: v for k, v in outputs.items() if k != "aux_outputs"}
 
-        # Retrieve the matching between the outputs of the last layer and the targets
-        indices = self.matcher(outputs_without_aux, targets)
+        iterable_update_target = True
+        if iterable_update_target:
+            # Compute the average number of target boxes accross all nodes, for normalization purposes
+            num_masks = sum(len(t["labels"]) for t in targets)
+            num_masks = torch.as_tensor(
+                [num_masks], dtype=torch.float, device=next(iter(outputs.values())).device
+            )
+            if is_dist_avail_and_initialized():
+                torch.distributed.all_reduce(num_masks)
+            num_masks = torch.clamp(num_masks / get_world_size(), min=1).item()
 
-        # Compute the average number of target boxes accross all nodes, for normalization purposes
-        num_masks = sum(len(t["labels"]) for t in targets)
-        num_masks = torch.as_tensor(
-            [num_masks], dtype=torch.float, device=next(iter(outputs.values())).device
-        )
-        if is_dist_avail_and_initialized():
-            torch.distributed.all_reduce(num_masks)
-        num_masks = torch.clamp(num_masks / get_world_size(), min=1).item()
+            # Compute all the requested losses
+            losses = {}
 
-        # Compute all the requested losses
-        losses = {}
-        for loss in self.losses:
-            losses.update(self.get_loss(loss, outputs, targets, indices, num_masks))
+            # compute loss of auxiliary decoder layer
+            # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
+            if "aux_outputs" in outputs:
+                for i, aux_outputs in enumerate(outputs["aux_outputs"]):
+                    indices = self.matcher(aux_outputs, targets)
+                    for loss in self.losses:
+                        l_dict = self.get_loss(loss, aux_outputs, targets, indices, num_masks)
+                        l_dict = {k + f"_{i}": v for k, v in l_dict.items()}
+                        losses.update(l_dict)
+                    # update targets after curr lvl loss calculation
+                    targets = self.update_targets(aux_outputs, targets, indices)
 
-        # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
-        if "aux_outputs" in outputs:
-            for i, aux_outputs in enumerate(outputs["aux_outputs"]):
-                indices = self.matcher(aux_outputs, targets)
-                for loss in self.losses:
-                    l_dict = self.get_loss(loss, aux_outputs, targets, indices, num_masks)
-                    l_dict = {k + f"_{i}": v for k, v in l_dict.items()}
-                    losses.update(l_dict)
+            # compute los of final decoder layer
+            outputs_without_aux = {k: v for k, v in outputs.items() if k != "aux_outputs"}
+            # Retrieve the matching between the outputs of the last layer and the targets
+            indices = self.matcher(outputs_without_aux, targets)
+            for loss in self.losses:
+                losses.update(self.get_loss(loss, outputs, targets, indices, num_masks))
+
+        else:
+            outputs_without_aux = {k: v for k, v in outputs.items() if k != "aux_outputs"}
+
+            # Retrieve the matching between the outputs of the last layer and the targets
+            indices = self.matcher(outputs_without_aux, targets)
+
+            # Compute the average number of target boxes accross all nodes, for normalization purposes
+            num_masks = sum(len(t["labels"]) for t in targets)
+            num_masks = torch.as_tensor(
+                [num_masks], dtype=torch.float, device=next(iter(outputs.values())).device
+            )
+            if is_dist_avail_and_initialized():
+                torch.distributed.all_reduce(num_masks)
+            num_masks = torch.clamp(num_masks / get_world_size(), min=1).item()
+
+            # Compute all the requested losses
+            losses = {}
+            for loss in self.losses:
+                losses.update(self.get_loss(loss, outputs, targets, indices, num_masks))
+
+            # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
+            if "aux_outputs" in outputs:
+                for i, aux_outputs in enumerate(outputs["aux_outputs"]):
+                    indices = self.matcher(aux_outputs, targets)
+                    for loss in self.losses:
+                        l_dict = self.get_loss(loss, aux_outputs, targets, indices, num_masks)
+                        l_dict = {k + f"_{i}": v for k, v in l_dict.items()}
+                        losses.update(l_dict)
 
         return losses
 

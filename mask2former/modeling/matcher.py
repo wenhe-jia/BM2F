@@ -389,6 +389,7 @@ class HungarianMatcherProjMask(nn.Module):
         bs, num_queries = outputs["pred_logits"].shape[:2]
 
         indices = []
+        update_target = True
 
         # Iterate through batch size
         for b in range(bs):
