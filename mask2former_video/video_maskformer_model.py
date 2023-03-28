@@ -454,16 +454,16 @@ class VideoMaskFormer(nn.Module):
             out_labels = labels_per_image.tolist()  # [category] * topk
             out_masks = [m for m in masks.cpu()]  # [(T, H, W)] * topk
 
-            for i in range(len(out_scores)):
-                score = out_scores[i]
-                label = out_labels[i]
-                seq_masks = out_masks[i]
-
-                pred_path = vid_path + 'pred_' + str(i) + '_score_' + str(score)[:4] + '/'
-                os.makedirs(pred_path, exist_ok=True)
-                for t in range(seq_masks.shape[0]):
-                    mask_frame = seq_masks[t, :, :].to(dtype=torch.uint8).numpy() * 255
-                    cv2.imwrite(pred_path + 'frame_' + str(t) + '.png', mask_frame)
+            # for i in range(len(out_scores)):
+            #     score = out_scores[i]
+            #     label = out_labels[i]
+            #     seq_masks = out_masks[i]
+            #
+            #     pred_path = vid_path + 'pred_' + str(i) + '_score_' + str(score)[:4] + '/'
+            #     os.makedirs(pred_path, exist_ok=True)
+            #     for t in range(seq_masks.shape[0]):
+            #         mask_frame = seq_masks[t, :, :].to(dtype=torch.uint8).numpy() * 255
+            #         cv2.imwrite(pred_path + 'frame_' + str(t) + '.png', mask_frame)
         else:
             out_scores = []
             out_labels = []
