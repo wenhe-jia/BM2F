@@ -7,6 +7,10 @@ MODEL:
       MATCHER_TYPE: "projection_mask"
       MASK_TARGET_TYPE: "projection_mask"  # "projection_mask"
       MASK_PROJECTION_WEIGHT: 5.0
+      MASK_UPDATE:
+        ENABLED: True
+        STEPS: [0.0, 1.0]
+        PIX_THRS: [0.5]
 SOLVER:
   IMS_PER_BATCH: 8
   BASE_LR: 0.00005  # 0.0001

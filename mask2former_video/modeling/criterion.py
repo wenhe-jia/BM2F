@@ -182,7 +182,9 @@ class VideoSetCriterionProjMask(nn.Module):
         2) we supervise each pair of matched ground-truth / prediction (supervise class and box)
     """
 
-    def __init__(self, num_classes, matcher, weight_dict, eos_coef, losses):
+    def __init__(
+            self, num_classes, matcher, weight_dict, eos_coef, losses, update_mask, mask_update_steps, update_pix_thrs
+    ):
         """Create the criterion.
         Parameters:
             num_classes: number of object categories, omitting the special no-object category
@@ -197,9 +199,17 @@ class VideoSetCriterionProjMask(nn.Module):
         self.weight_dict = weight_dict
         self.eos_coef = eos_coef
         self.losses = losses
+
+        self.update_masks = update_mask
+        self.mask_update_steps = mask_update_steps
+        self.update_pix_thrs = update_pix_thrs
+        assert len(self.mask_update_steps) == len(self.update_pix_thrs) + 1
+
         empty_weight = torch.ones(self.num_classes + 1)
         empty_weight[-1] = self.eos_coef
         self.register_buffer("empty_weight", empty_weight)
+
+        self.register_buffer("_iter", torch.zeros([1]))
 
     def loss_labels(self, outputs, targets, indices, num_masks):
         """Classification loss (NLL)
@@ -410,6 +420,61 @@ class VideoSetCriterionProjMask(nn.Module):
         assert loss in loss_map, f"do you really want to compute {loss} loss?"
         return loss_map[loss](outputs, targets, indices, num_masks)
 
+    @torch.no_grad()
+    def update_targets(self, src_probs_per_batch, targets_per_batch, indices_per_batch, pix_thr=0.3, overlap_thr=0.0):
+        """
+        indices_curr_lvl: [(tensor(G,), tensor(G,))] x num_img
+        """
+        src_probs_per_batch = src_probs_per_batch["pred_masks"]  # (B, Q, T, H, W)
+        B = src_probs_per_batch.shape[0]
+        T = src_probs_per_batch.shape[2]
+        src_probs_per_batch = src_probs_per_batch.split(B, 0)[0]  # 【(Q, T, H, W)] x B
+
+        new_targets = []
+        for indice, src_probs, targets in zip(indices_per_batch, src_probs_per_batch, targets_per_batch):
+            box_masks = targets["box_masks"]  # (G, T, H, W)
+            left_bounds = targets["left_bounds"]  # (G, T, H)
+            right_bounds = targets["right_bounds"]  # (G, T, H)
+            top_bounds = targets["top_bounds"]  # (G, T, W)
+            bottom_bounds = targets["bottom_bounds"]  # (G, T, W)
+
+            new_box_masks = torch.zeros_like(box_masks)
+            new_left_bounds = torch.zeros_like(left_bounds)
+            new_right_bounds = torch.zeros_like(right_bounds)
+            new_top_bnounds = torch.zeros_like(top_bounds)
+            new_bottom_bounds = torch.zeros_like(bottom_bounds)
+
+            for src_idx, tgt_idx in zip(indice[0], indice[1]):
+                new_box_mask = (src_probs[src_idx].sigmoid() >= pix_thr) * box_masks[tgt_idx]  # (T, H, W)
+
+                if new_box_masks[tgt_idx].sum() >= overlap_thr:
+                    new_box_masks[tgt_idx] = new_box_mask
+
+                    for f_i in range(T):
+                        # bounds for y projection
+                        new_left_bounds[tgt_idx, f_i] = torch.argmax(new_box_masks[tgt_idx, f_i], dim=1)
+                        new_right_bounds[tgt_idx, f_i] = new_box_masks[tgt_idx, f_i].shape[1] - \
+                                                    torch.argmax(new_box_masks[tgt_idx, f_i].flip(1), dim=1)
+                        # bounds for x projection
+                        new_top_bnounds[tgt_idx, f_i] = torch.argmax(new_box_masks[tgt_idx, f_i], dim=0)
+                        new_bottom_bounds[tgt_idx, f_i] = new_box_masks[tgt_idx, f_i].shape[0] - \
+                                                     torch.argmax(new_box_masks[tgt_idx, f_i].flip(0), dim=0)
+                else:
+                    new_box_masks[tgt_idx] = box_masks[tgt_idx]
+                    new_left_bounds[tgt_idx] = left_bounds[tgt_idx]
+                    new_right_bounds[tgt_idx] = right_bounds[tgt_idx]
+                    new_top_bnounds[tgt_idx] = top_bounds[tgt_idx]
+                    new_bottom_bounds[tgt_idx] = bottom_bounds[tgt_idx]
+
+            targets["box_masks"] = new_box_masks
+            targets["left_bounds"] = new_left_bounds
+            targets["right_bounds"] = new_right_bounds
+            targets["top_bounds"] = new_top_bnounds
+            targets["bottom_bounds"] = new_bottom_bounds
+
+            new_targets.append(targets)
+        return new_targets
+
     def forward(self, outputs, targets):
         """This performs the loss computation.
         Parameters:
@@ -422,33 +487,76 @@ class VideoSetCriterionProjMask(nn.Module):
             "masks": (num_gt, T, H, W)
             "box_masks": (num_gt, T, H/4, W/4)
         """
-        outputs_without_aux = {k: v for k, v in outputs.items() if k != "aux_outputs"}
+        if self.update_masks:
+            # Compute the average number of target boxes accross all nodes, for normalization purposes
+            num_masks = sum(len(t["labels"]) for t in targets)
+            num_masks = torch.as_tensor(
+                [num_masks], dtype=torch.float, device=next(iter(outputs.values())).device
+            )
+            if is_dist_avail_and_initialized():
+                torch.distributed.all_reduce(num_masks)
+            num_masks = torch.clamp(num_masks / get_world_size(), min=1).item()
 
-        # Retrieve the matching between the outputs of the last layer and the targets
-        indices = self.matcher(outputs_without_aux, targets)
+            # Compute all the requested losses
+            losses = {}
 
-        # Compute the average number of target boxes accross all nodes, for normalization purposes
-        num_masks = sum(len(t["labels"]) for t in targets)
-        num_masks = torch.as_tensor(
-            [num_masks], dtype=torch.float, device=next(iter(outputs.values())).device
-        )
-        if is_dist_avail_and_initialized():
-            torch.distributed.all_reduce(num_masks)
-        num_masks = torch.clamp(num_masks / get_world_size(), min=1).item()
+            # pix_thrs = [0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10]
+            # pix_thrs = [0.30, 0.30, 0.30, 0.30, 0.30, 0.30, 0.30, 0.30, 0.30]
+            # pix_thrs = [0.50, 0.50, 0.50, 0.50, 0.50, 0.50, 0.50, 0.50, 0.50]
+            # pix_thrs = [0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50]
+            # calculate mask update pix thr
+            thr_ind = 0
+            for ind in range(len(self.mask_update_steps) - 1):
+                if self._iter >= self.mask_update_steps[ind] and self._iter < self.mask_update_steps[ind + 1]:
+                    thr_ind = ind
+            pix_thr = self.update_pix_thrs[thr_ind]
 
-        # Compute all the requested losses
-        losses = {}
-        for loss in self.losses:
-            losses.update(self.get_loss(loss, outputs, targets, indices, num_masks))
+            # compute loss of auxiliary decoder layer
+            # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
+            if "aux_outputs" in outputs:
+                for i, aux_outputs in enumerate(outputs["aux_outputs"]):
+                    indices = self.matcher(aux_outputs, targets)
+                    for loss in self.losses:
+                        l_dict = self.get_loss(loss, aux_outputs, targets, indices, num_masks)
+                        l_dict = {k + f"_{i}": v for k, v in l_dict.items()}
+                        losses.update(l_dict)
+                    # update targets after curr lvl loss calculation
+                    targets = self.update_targets(aux_outputs, targets, indices, pix_thr=pix_thr)
 
-        # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
-        if "aux_outputs" in outputs:
-            for i, aux_outputs in enumerate(outputs["aux_outputs"]):
-                indices = self.matcher(aux_outputs, targets)
-                for loss in self.losses:
-                    l_dict = self.get_loss(loss, aux_outputs, targets, indices, num_masks)
-                    l_dict = {k + f"_{i}": v for k, v in l_dict.items()}
-                    losses.update(l_dict)
+            # compute los of final decoder layer
+            outputs_without_aux = {k: v for k, v in outputs.items() if k != "aux_outputs"}
+            # Retrieve the matching between the outputs of the last layer and the targets
+            indices = self.matcher(outputs_without_aux, targets)
+            for loss in self.losses:
+                losses.update(self.get_loss(loss, outputs, targets, indices, num_masks))
+        else:
+            outputs_without_aux = {k: v for k, v in outputs.items() if k != "aux_outputs"}
+
+            # Retrieve the matching between the outputs of the last layer and the targets
+            indices = self.matcher(outputs_without_aux, targets)
+
+            # Compute the average number of target boxes accross all nodes, for normalization purposes
+            num_masks = sum(len(t["labels"]) for t in targets)
+            num_masks = torch.as_tensor(
+                [num_masks], dtype=torch.float, device=next(iter(outputs.values())).device
+            )
+            if is_dist_avail_and_initialized():
+                torch.distributed.all_reduce(num_masks)
+            num_masks = torch.clamp(num_masks / get_world_size(), min=1).item()
+
+            # Compute all the requested losses
+            losses = {}
+            for loss in self.losses:
+                losses.update(self.get_loss(loss, outputs, targets, indices, num_masks))
+
+            # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
+            if "aux_outputs" in outputs:
+                for i, aux_outputs in enumerate(outputs["aux_outputs"]):
+                    indices = self.matcher(aux_outputs, targets)
+                    for loss in self.losses:
+                        l_dict = self.get_loss(loss, aux_outputs, targets, indices, num_masks)
+                        l_dict = {k + f"_{i}": v for k, v in l_dict.items()}
+                        losses.update(l_dict)
 
         return losses
 

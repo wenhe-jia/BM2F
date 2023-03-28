@@ -192,6 +192,12 @@ class MaskFormer(nn.Module):
                     weight_dict=weight_dict,
                     eos_coef=no_object_weight,
                     losses=losses,
+                    update_mask=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_UPDATE.ENABLED,
+                    mask_update_steps=[
+                        int(x * cfg.SOLVER.MAX_ITER)
+                        for x in cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_UPDATE.STEPS
+                    ],
+                    update_pix_thrs=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_UPDATE.PIX_THRS
                 )
             elif mask_target_type == "projection_and_pairwise":
                 # losses = ["labels", "projection_masks", "pairwise"]

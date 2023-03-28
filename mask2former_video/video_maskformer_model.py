@@ -162,6 +162,12 @@ class VideoMaskFormer(nn.Module):
             matcher = VideoHungarianMatcherProjMask(
                 cost_class=cfg.MODEL.MASK_FORMER.CLASS_WEIGHT,
                 cost_projection=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_PROJECTION_WEIGHT,
+                update_mask=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_UPDATE.ENABLED,
+                mask_update_steps=[
+                    int(x * cfg.SOLVER.MAX_ITER)
+                    for x in cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_UPDATE.STEPS
+                ],
+                update_pix_thrs=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_UPDATE.PIX_THRS
             )
         elif matcher_target_type == "projection_and_pairwise":
             raise Exception("Unsupported yet!!!")
@@ -342,43 +348,32 @@ class VideoMaskFormer(nn.Module):
                             ins_i, f_i, int(gt_box[1]):int(gt_box[3] + 1), int(gt_box[0]):int(gt_box[2] + 1)
                         ] = 1.0
 
-                        # # limited x for y projection
-                        # gt_boxmasks_limited_x_full_per_video[
-                        #     ins_i, f_i, :int(gt_box[1]), :
-                        # ] = 1.0  # top
-                        # gt_boxmasks_limited_x_full_per_video[
-                        #     ins_i, f_i, int(gt_box[1]):int(gt_box[3] + 1), int(gt_box[0]):int(gt_box[2] + 1)
-                        # ] = 1.0  # middle
-                        # gt_boxmasks_limited_x_full_per_video[
-                        #     ins_i, f_i, int(gt_box[3] + 1):, :
-                        # ] = 1.0  # bottom
+                        gt_mask = box_masks_full_per_image[ins_i].int()  # (H, W)
+                        # bounds for y projection
+                        left_bounds_full_per_video[ins_i, f_i] = torch.argmax(gt_mask, dim=1)
+                        right_bounds_full_per_video[ins_i, f_i] = gt_mask.shape[1] - \
+                                                                   torch.argmax(gt_mask.flip(1), dim=1)
+                        # bounds for x projection
+                        top_bounds_full_per_video[ins_i, f_i] = torch.argmax(gt_mask, dim=0)
+                        bottom_bounds_full_per_video[ins_i, f_i] = gt_mask.shape[0] - \
+                                                              torch.argmax(gt_mask.flip(0), dim=0)
+                        
+                        
+                        # left_bounds_full_per_video[ins_i, f_i, :int(gt_box[1])] = 0.
+                        # left_bounds_full_per_video[ins_i, f_i, int(gt_box[1]):int(gt_box[3] + 1)] = int(gt_box[0])
+                        # left_bounds_full_per_video[ins_i, f_i, int(gt_box[3] + 1):] = 0.
                         #
-                        # # limited y for x projection
-                        # gt_boxmasks_limited_y_full_per_video[
-                        #     ins_i, f_i, :, :int(gt_box[0])
-                        # ] = 1.0  # left
-                        # gt_boxmasks_limited_y_full_per_video[
-                        #     ins_i, f_i, int(gt_box[1]):int(gt_box[3] + 1), int(gt_box[0]):int(gt_box[2] + 1)
-                        # ] = 1.0  # middle
-                        # gt_boxmasks_limited_y_full_per_video[
-                        #     ins_i, f_i, :, int(gt_box[2] + 1):
-                        # ] = 1.0  # right
-
-                        left_bounds_full_per_video[ins_i, f_i, :int(gt_box[1])] = 0.
-                        left_bounds_full_per_video[ins_i, f_i, int(gt_box[1]):int(gt_box[3] + 1)] = int(gt_box[0])
-                        left_bounds_full_per_video[ins_i, f_i, int(gt_box[3] + 1):] = 0.
-
-                        right_bounds_full_per_video[ins_i, f_i, :int(gt_box[1])] = w_pad
-                        right_bounds_full_per_video[ins_i, f_i, int(gt_box[1]):int(gt_box[3] + 1)] = int(gt_box[2] + 1)
-                        right_bounds_full_per_video[ins_i, f_i, int(gt_box[3] + 1):] = w_pad
-
-                        top_bounds_full_per_video[ins_i, f_i, :int(gt_box[0])] = 0.
-                        top_bounds_full_per_video[ins_i, f_i, int(gt_box[0]):int(gt_box[2] + 1)] = int(gt_box[1])
-                        top_bounds_full_per_video[ins_i, f_i, int(gt_box[2] + 1):] = 0.
-
-                        bottom_bounds_full_per_video[ins_i, f_i, :int(gt_box[0])] = h_pad
-                        bottom_bounds_full_per_video[ins_i, f_i, int(gt_box[0]):int(gt_box[2] + 1)] = int(gt_box[3] + 1)
-                        bottom_bounds_full_per_video[ins_i, f_i, int(gt_box[2] + 1):] = h_pad
+                        # right_bounds_full_per_video[ins_i, f_i, :int(gt_box[1])] = w_pad
+                        # right_bounds_full_per_video[ins_i, f_i, int(gt_box[1]):int(gt_box[3] + 1)] = int(gt_box[2] + 1)
+                        # right_bounds_full_per_video[ins_i, f_i, int(gt_box[3] + 1):] = w_pad
+                        #
+                        # top_bounds_full_per_video[ins_i, f_i, :int(gt_box[0])] = 0.
+                        # top_bounds_full_per_video[ins_i, f_i, int(gt_box[0]):int(gt_box[2] + 1)] = int(gt_box[1])
+                        # top_bounds_full_per_video[ins_i, f_i, int(gt_box[2] + 1):] = 0.
+                        #
+                        # bottom_bounds_full_per_video[ins_i, f_i, :int(gt_box[0])] = h_pad
+                        # bottom_bounds_full_per_video[ins_i, f_i, int(gt_box[0]):int(gt_box[2] + 1)] = int(gt_box[3] + 1)
+                        # bottom_bounds_full_per_video[ins_i, f_i, int(gt_box[2] + 1):] = h_pad
 
             # (num_ins, T, h_pad/4, w_pad/4)
             gt_boxmasks_per_video = gt_boxmasks_full_per_video[:, :, start::stride, start::stride]

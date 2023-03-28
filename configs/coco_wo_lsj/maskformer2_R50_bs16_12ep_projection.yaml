@@ -41,6 +41,10 @@ MODEL:
       MATCHER_TYPE: "projection_mask"
       MASK_TARGET_TYPE: "projection_mask"
       MASK_PROJECTION_WEIGHT: 5.0
+      MASK_UPDATE:
+        ENABLED: True
+        STEPS: [0.0, 0.5, 1.0]
+        PIX_THRS: [0.0, 0.3]
     TEST:
       SEMANTIC_ON: False
       INSTANCE_ON: True
@@ -52,6 +56,7 @@ SOLVER:
   BASE_LR: 0.00005  # 0.0001
   STEPS: (120000, 160000)  # (60000, 80000)
   MAX_ITER: 180000  # 90000
+  CHECKPOINT_PERIOD: 20000
 TEST:
   EVAL_PERIOD: 20000
 #INPUT:
