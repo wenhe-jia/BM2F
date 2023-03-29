@@ -320,7 +320,7 @@ class VideoSetCriterionProjPair(nn.Module):
 
         warmup_factor = min(self._iter.item() / float(self.pairwise_warmup_iters), 1.0)
         losses = {
-            "loss_pairwise": pairwise_loss_jit(src_similarities, target_similarities, num_masks) * warmup_factor
+            "loss_mask_pairwise": pairwise_loss_jit(src_similarities, target_similarities, num_masks) * warmup_factor
         }
 
         del target_similarities
