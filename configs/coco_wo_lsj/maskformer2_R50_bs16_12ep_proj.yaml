@@ -36,10 +36,8 @@ MODEL:
     TRAIN_NUM_POINTS: 12544
     OVERSAMPLE_RATIO: 3.0
     IMPORTANCE_SAMPLE_RATIO: 0.75
+    SUP_TYPE: "projection_mask"
     WEAK_SUPERVISION:
-      ENABLED: True
-      MATCHER_TYPE: "projection_mask"
-      MASK_TARGET_TYPE: "projection_mask"
       MASK_PROJECTION_WEIGHT: 5.0
       MASK_UPDATE:
         ENABLED: True

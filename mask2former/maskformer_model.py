@@ -17,8 +17,8 @@ from detectron2.structures import Boxes, ImageList, Instances, BitMasks
 from detectron2.utils.memory import retry_if_cuda_oom
 from detectron2.structures.masks import BitMasks
 
-from .modeling.criterion import SetCriterion, SetCriterionProjection, SetCriterionWeakSup
-from .modeling.matcher import HungarianMatcherProjMask, HungarianMatcherWeakSup
+from .modeling.criterion import SetCriterion, SetCriterionProj, SetCriterionProjPair
+from .modeling.matcher import HungarianMatcherProj, HungarianMatcherProjPair
 from .utils.weaksup_utils import unfold_wo_center, get_images_color_similarity
 
 from skimage import color
@@ -37,7 +37,6 @@ class MaskFormer(nn.Module):
         *,
         backbone: Backbone,
         sem_seg_head: nn.Module,
-        weak_supervision: bool,
         criterion: nn.Module,
         num_queries: int,
         object_mask_threshold: float,
@@ -52,6 +51,7 @@ class MaskFormer(nn.Module):
         panoptic_on: bool,
         instance_on: bool,
         test_topk_per_image: int,
+        weak_supervision: bool,
         # pairwise
         pairwise_size: int,
         pairwise_dilation: int
@@ -120,59 +120,33 @@ class MaskFormer(nn.Module):
         # Loss parameters:
         deep_supervision = cfg.MODEL.MASK_FORMER.DEEP_SUPERVISION
         no_object_weight = cfg.MODEL.MASK_FORMER.NO_OBJECT_WEIGHT
+        weak_supervision = False
 
         # define supervision type
-        weak_supervision = cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.ENABLED
-        matcher_target_type = cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MATCHER_TYPE
-        mask_target_type = cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_TARGET_TYPE
+        supervision_type = cfg.MODEL.MASK_FORMER.SUP_TYPE
+        if supervision_type != "mask":
+            weak_supervision = True
 
-        if weak_supervision:
-            if mask_target_type == "projection_mask":
-                weight_dict = {
-                    "loss_ce": cfg.MODEL.MASK_FORMER.CLASS_WEIGHT,
-                    "loss_mask_projection": cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_PROJECTION_WEIGHT
-                }
-            elif mask_target_type == "projection_and_pairwise":
-                weight_dict = {
-                    "loss_ce": cfg.MODEL.MASK_FORMER.CLASS_WEIGHT,
-                    "loss_mask_projection": cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_PROJECTION_WEIGHT,
-                    "loss_pairwise": cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE_WEIGHT
-                }
-            else:
-                raise Exception("Unknown mask_target_type type !!!")
-        else:
+        if supervision_type == "mask":
             weight_dict = {
                 "loss_ce": cfg.MODEL.MASK_FORMER.CLASS_WEIGHT,
                 "loss_mask": cfg.MODEL.MASK_FORMER.MASK_WEIGHT,
                 "loss_dice": cfg.MODEL.MASK_FORMER.DICE_WEIGHT
             }
-
-        # build matcher
-        if matcher_target_type == "mask":
-            matcher = HungarianMatcherMask(
-                cost_class=cfg.MODEL.MASK_FORMER.CLASS_WEIGHT,
-                cost_mask=cfg.MODEL.MASK_FORMER.MASK_WEIGHT,
-                cost_dice=cfg.MODEL.MASK_FORMER.DICE_WEIGHT,
-                num_points=cfg.MODEL.MASK_FORMER.TRAIN_NUM_POINTS,
-                target_type=matcher_target_type
-            )
-        elif matcher_target_type == "projection_mask":
-            matcher = HungarianMatcherProjMask(
-                cost_class=cfg.MODEL.MASK_FORMER.CLASS_WEIGHT,
-                cost_projection=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_PROJECTION_WEIGHT,
-            )
-        elif mask_target_type == "projection_and_pairwise":
-            matcher = HungarianMatcherWeakSup(
-                cost_class=cfg.MODEL.MASK_FORMER.CLASS_WEIGHT,
-                cost_projection=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_PROJECTION_WEIGHT,
-                cost_pairwise=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE_WEIGHT,
-                pairwise_size=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.SIZE,
-                pairwise_dilation=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.DILATION,
-                pairwise_color_thresh=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.COLOR_THRESH,
-                pairwise_warmup_iters=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.WARMUP_ITERS,
-            )
+        elif supervision_type == "mask_projection":
+            weight_dict = {
+                "loss_ce": cfg.MODEL.MASK_FORMER.CLASS_WEIGHT,
+                "loss_mask_projection": cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PROJECTION_WEIGHT
+            }
+        elif supervision_type == "mask_projection_and_pairwise":
+            weight_dict = {
+                "loss_ce": cfg.MODEL.MASK_FORMER.CLASS_WEIGHT,
+                "loss_mask_projection": cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PROJECTION_WEIGHT,
+                "loss_mask_pairwise": cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE_WEIGHT
+            }
         else:
-            raise Exception("Unknown Matcher type !!!")
+            raise Exception("Unknown supervision type !!!")
+
 
         # set loss weight dict
         if deep_supervision:
@@ -182,44 +156,14 @@ class MaskFormer(nn.Module):
                 aux_weight_dict.update({k + f"_{i}": v for k, v in weight_dict.items()})
             weight_dict.update(aux_weight_dict)
 
-        # build criterion
-        if weak_supervision:
-            if mask_target_type == "projection_mask":
-                losses = ["labels", "projection_masks"]
-                criterion = SetCriterionProjection(
-                    sem_seg_head.num_classes,
-                    matcher=matcher,
-                    weight_dict=weight_dict,
-                    eos_coef=no_object_weight,
-                    losses=losses,
-                    update_mask=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_UPDATE.ENABLED,
-                    mask_update_steps=[
-                        int(x * cfg.SOLVER.MAX_ITER)
-                        for x in cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_UPDATE.STEPS
-                    ],
-                    update_pix_thrs=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_UPDATE.PIX_THRS
-                )
-            elif mask_target_type == "projection_and_pairwise":
-                # losses = ["labels", "projection_masks", "pairwise"]
-                losses = ["labels", "pairwise"]
-                criterion = SetCriterionWeakSup(
-                    sem_seg_head.num_classes,
-                    matcher=matcher,
-                    weight_dict=weight_dict,
-                    eos_coef=no_object_weight,
-                    pairwise_size=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.SIZE,
-                    pairwise_dilation=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.DILATION,
-                    pairwise_color_thresh=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.COLOR_THRESH,
-                    pairwise_warmup_iters=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.WARMUP_ITERS,
-                    losses=losses,
-                    point_sample=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.POINT_SAMPLE,
-                    num_points=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.TRAIN_NUM_POINTS,
-                    oversample_ratio=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.OVERSAMPLE_RATIO,
-                    importance_sample_ratio=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.IMPORTANCE_SAMPLE_RATIO,
-                )
-            else:
-                raise Exception("Unknown mask_target_type type !!!")
-        else:
+        # build matcher and criterion
+        if supervision_type == "mask":
+            matcher = HungarianMatcher(
+                cost_class=cfg.MODEL.MASK_FORMER.CLASS_WEIGHT,
+                cost_mask=cfg.MODEL.MASK_FORMER.MASK_WEIGHT,
+                cost_dice=cfg.MODEL.MASK_FORMER.DICE_WEIGHT,
+                num_points=cfg.MODEL.MASK_FORMER.TRAIN_NUM_POINTS,
+            )
             losses = ["labels", "masks"]
             criterion = SetCriterion(
                 sem_seg_head.num_classes,
@@ -230,13 +174,60 @@ class MaskFormer(nn.Module):
                 num_points=cfg.MODEL.MASK_FORMER.TRAIN_NUM_POINTS,
                 oversample_ratio=cfg.MODEL.MASK_FORMER.OVERSAMPLE_RATIO,
                 importance_sample_ratio=cfg.MODEL.MASK_FORMER.IMPORTANCE_SAMPLE_RATIO,
-                mask_target_type="mask",
             )
+        elif supervision_type == "mask_projection":
+            matcher = HungarianMatcherProj(
+                cost_class=cfg.MODEL.MASK_FORMER.CLASS_WEIGHT,
+                cost_projection=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_PROJECTION_WEIGHT,
+            )
+            losses = ["labels", "projection_masks"]
+            criterion = SetCriterionProj(
+                sem_seg_head.num_classes,
+                matcher=matcher,
+                weight_dict=weight_dict,
+                eos_coef=no_object_weight,
+                losses=losses,
+                update_mask=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_UPDATE.ENABLED,
+                mask_update_steps=[
+                    int(x * cfg.SOLVER.MAX_ITER)
+                    for x in cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_UPDATE.STEPS
+                ],
+                update_pix_thrs=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_UPDATE.PIX_THRS
+            )
+        elif supervision_type == "mask_projection_and_pairwise":
+            matcher = HungarianMatcherProjPair(
+                cost_class=cfg.MODEL.MASK_FORMER.CLASS_WEIGHT,
+                cost_projection=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_PROJECTION_WEIGHT,
+                cost_pairwise=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE_WEIGHT,
+                pairwise_size=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.SIZE,
+                pairwise_dilation=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.DILATION,
+                pairwise_color_thresh=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.COLOR_THRESH,
+                pairwise_warmup_iters=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.WARMUP_ITERS,
+            )
+            losses = ["labels", "projection_masks", "pairwise"]
+            # losses = ["labels", "pairwise"]
+            criterion = SetCriterionProjPair(
+                sem_seg_head.num_classes,
+                matcher=matcher,
+                weight_dict=weight_dict,
+                eos_coef=no_object_weight,
+                pairwise_size=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.SIZE,
+                pairwise_dilation=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.DILATION,
+                pairwise_color_thresh=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.COLOR_THRESH,
+                pairwise_warmup_iters=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.WARMUP_ITERS,
+                losses=losses,
+                point_sample=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.POINT_SAMPLE,
+                num_points=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.TRAIN_NUM_POINTS,
+                oversample_ratio=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.OVERSAMPLE_RATIO,
+                importance_sample_ratio=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.IMPORTANCE_SAMPLE_RATIO,
+            )
+        else:
+            raise Exception("Unknown supervision type !!!")
+
 
         return {
             "backbone": backbone,
             "sem_seg_head": sem_seg_head,
-            "weak_supervision": weak_supervision,
             "criterion": criterion,
             "num_queries": cfg.MODEL.MASK_FORMER.NUM_OBJECT_QUERIES,
             "object_mask_threshold": cfg.MODEL.MASK_FORMER.TEST.OBJECT_MASK_THRESHOLD,
@@ -255,6 +246,7 @@ class MaskFormer(nn.Module):
             "instance_on": cfg.MODEL.MASK_FORMER.TEST.INSTANCE_ON,
             "panoptic_on": cfg.MODEL.MASK_FORMER.TEST.PANOPTIC_ON,
             "test_topk_per_image": cfg.TEST.DETECTIONS_PER_IMAGE,
+            "weak_supervision": weak_supervision,
             "pairwise_size": cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.SIZE,
             "pairwise_dilation": cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.DILATION
         }
@@ -407,42 +399,42 @@ class MaskFormer(nn.Module):
     def prepare_weaksup_targets(self, targets, org_images, img_heights):
         # 使用没有经过ImageList之前的图像是为了把每张mask底部的若干像素置为0
         # masks of org image shape
-        # org_image_masks = [torch.ones_like(x[0], dtype=torch.float32) for x in org_images]
-        # # mask out the bottom area where the COCO dataset probably has wrong annotations
-        # for i in range(len(org_image_masks)):
-        #     im_h = img_heights[i]
-        #     pixels_removed = int(
-        #         self.bottom_pixels_removed *
-        #         float(org_images[i].size(1)) / float(im_h)
-        #     )
-        #     if pixels_removed > 0:
-        #         org_image_masks[i][-pixels_removed:, :] = 0
+        org_image_masks = [torch.ones_like(x[0], dtype=torch.float32) for x in org_images]
+        # mask out the bottom area where the COCO dataset probably has wrong annotations
+        for i in range(len(org_image_masks)):
+            im_h = img_heights[i]
+            pixels_removed = int(
+                self.bottom_pixels_removed *
+                float(org_images[i].size(1)) / float(im_h)
+            )
+            if pixels_removed > 0:
+                org_image_masks[i][-pixels_removed:, :] = 0
 
         # calculate color similarity, pad org images which is not normalized by pix mean and std
         original_images = ImageList.from_tensors(org_images, self.size_divisibility).tensor
-        # original_image_masks = ImageList.from_tensors(org_image_masks, self.size_divisibility, pad_value=0.0).tensor
+        original_image_masks = ImageList.from_tensors(org_image_masks, self.size_divisibility, pad_value=0.0).tensor
 
         stride = self.mask_out_stride  # 4
         start = int(stride // 2)
         assert original_images.size(2) % stride == 0
         assert original_images.size(3) % stride == 0
         # down sample org image and masks(of torch.ones)
-        # downsampled_images = F.avg_pool2d(
-        #     original_images.float(), kernel_size=stride,
-        #     stride=stride, padding=0
-        # )[:, [2, 1, 0]]  # (N, C, H, W) --> (N, C, H/4, W/4) --> (N, W/4, H/4, C)
-        # downsampled_image_masks = original_image_masks[:, start::stride, start::stride]  # (N, H/4, W/4), do not use interpolate to ensure org pixel
+        downsampled_images = F.avg_pool2d(
+            original_images.float(), kernel_size=stride,
+            stride=stride, padding=0
+        )[:, [2, 1, 0]]  # (N, 3, H, W) --> (N, 3, H/4, W/4) --> (N, W/4, H/4, 3)
+        downsampled_image_masks = original_image_masks[:, start::stride, start::stride]  # (N, H/4, W/4), do not use interpolate to ensure org pixel
 
-        h_pad, w_pad = original_images.shape[-2:]  ###
+        h_pad, w_pad = original_images.shape[-2:]
         new_targets = []  # store targets of each image
         for im_ind, targets_per_image in enumerate(targets):
-            # images_lab = color.rgb2lab(downsampled_images[im_ind].byte().permute(1, 2, 0).cpu().numpy()[:, :, ::-1])  # (H/4, W/4, 3)
-            # images_lab = torch.as_tensor(images_lab, device=downsampled_images.device, dtype=torch.float32)
-            # images_lab = images_lab.permute(2, 0, 1)[None]  # (1, 3, H/4, W/4)
-            # images_color_similarity = get_images_color_similarity(
-            #     images_lab, downsampled_image_masks[im_ind],
-            #     self.pairwise_size, self.pairwise_dilation
-            # )  # (1, k*k-1, H/4, W/4)
+            images_lab = color.rgb2lab(downsampled_images[im_ind].byte().permute(1, 2, 0).cpu().numpy()[:, :, ::-1])  # (H/4, W/4, 3)
+            images_lab = torch.as_tensor(images_lab, device=downsampled_images.device, dtype=torch.float32)
+            images_lab = images_lab.permute(2, 0, 1)[None]  # (1, 3, H/4, W/4)
+            images_color_similarity = get_images_color_similarity(
+                images_lab, downsampled_image_masks[im_ind],
+                self.pairwise_size, self.pairwise_dilation
+            )  # (1, k*k-1, H/4, W/4)
 
             ###### for progressive projection upper bounds with gt_mask #####
             # gt_masks = targets_per_image.gt_masks
@@ -478,22 +470,6 @@ class MaskFormer(nn.Module):
                         int(gt_box[0]):int(gt_box[2]) + 1
                     ] = 1.0
 
-                    # left_bounds_full_per_image[ins_i, :int(gt_box[1])] = 0.
-                    # left_bounds_full_per_image[ins_i, int(gt_box[1]):int(gt_box[3] + 1)] = int(gt_box[0])
-                    # left_bounds_full_per_image[ins_i, int(gt_box[3] + 1):] = 0.
-                    # 
-                    # right_bounds_full_per_image[ins_i, :int(gt_box[1])] = w_pad
-                    # right_bounds_full_per_image[ins_i, int(gt_box[1]):int(gt_box[3] + 1)] = int(gt_box[2] + 1)
-                    # right_bounds_full_per_image[ins_i, int(gt_box[3] + 1):] = w_pad
-                    # 
-                    # top_bounds_full_per_image[ins_i, :int(gt_box[0])] = 0.
-                    # top_bounds_full_per_image[ins_i, int(gt_box[0]):int(gt_box[2] + 1)] = int(gt_box[1])
-                    # top_bounds_full_per_image[ins_i, int(gt_box[2] + 1):] = 0.
-                    # 
-                    # bottom_bounds_full_per_image[ins_i, :int(gt_box[0])] = h_pad
-                    # bottom_bounds_full_per_image[ins_i, int(gt_box[0]):int(gt_box[2] + 1)] = int(gt_box[3] + 1)
-                    # bottom_bounds_full_per_image[ins_i, int(gt_box[2] + 1):] = h_pad
-
                     ###### for progressive projection upper bounds with gt_mask #####
                     gt_mask = box_masks_full_per_image[ins_i].int()  # (H, W)
                     # bounds for y projection
@@ -516,9 +492,9 @@ class MaskFormer(nn.Module):
                     "labels": targets_per_image.gt_classes,
                     # "masks": padded_masks,
                     "box_masks": box_masks_per_image,
-                    # "images_color_similarity": torch.cat(
-                    #     [images_color_similarity for _ in range(len(targets_per_image))], dim=0
-                    # )  # (image_gt_num, k*k-1, H/4, W/4)
+                    "images_color_similarity": torch.cat(
+                        [images_color_similarity for _ in range(len(targets_per_image))], dim=0
+                    ),  # (image_gt_num, k*k-1, H/4, W/4)
                     "left_bounds": left_bounds_per_image.float(),
                     "right_bounds": right_bounds_per_image.float(),
                     "top_bounds": top_bounds_per_image.float(),
