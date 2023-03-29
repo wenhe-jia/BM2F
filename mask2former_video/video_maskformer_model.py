@@ -162,12 +162,6 @@ class VideoMaskFormer(nn.Module):
             matcher = VideoHungarianMatcherProjMask(
                 cost_class=cfg.MODEL.MASK_FORMER.CLASS_WEIGHT,
                 cost_projection=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_PROJECTION_WEIGHT,
-                update_mask=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_UPDATE.ENABLED,
-                mask_update_steps=[
-                    int(x * cfg.SOLVER.MAX_ITER)
-                    for x in cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_UPDATE.STEPS
-                ],
-                update_pix_thrs=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_UPDATE.PIX_THRS
             )
         elif matcher_target_type == "projection_and_pairwise":
             raise Exception("Unsupported yet!!!")
@@ -184,6 +178,12 @@ class VideoMaskFormer(nn.Module):
                     weight_dict=weight_dict,
                     eos_coef=no_object_weight,
                     losses=losses,
+                    update_mask=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_UPDATE.ENABLED,
+                    mask_update_steps=[
+                        int(x * cfg.SOLVER.MAX_ITER)
+                        for x in cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_UPDATE.STEPS
+                    ],
+                    update_pix_thrs=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_UPDATE.PIX_THRS
                 )
             elif mask_target_type == "projection_and_pairwise":
                 raise Exception("Unsupported yet!!!")
@@ -260,7 +260,7 @@ class VideoMaskFormer(nn.Module):
 
             vid_path = self.output_dir + '/vis/vid_' + \
                        batched_inputs[0]['file_names'][0].split('/')[-2] + '/'
-            os.makedirs(vid_path, exist_ok=True)
+            # os.makedirs(vid_path, exist_ok=True)
 
         images = []
         for video in batched_inputs:
@@ -348,7 +348,7 @@ class VideoMaskFormer(nn.Module):
                             ins_i, f_i, int(gt_box[1]):int(gt_box[3] + 1), int(gt_box[0]):int(gt_box[2] + 1)
                         ] = 1.0
 
-                        gt_mask = box_masks_full_per_image[ins_i].int()  # (H, W)
+                        gt_mask = gt_boxmasks_full_per_video[ins_i, f_i].int()  # (H, W)
                         # bounds for y projection
                         left_bounds_full_per_video[ins_i, f_i] = torch.argmax(gt_mask, dim=1)
                         right_bounds_full_per_video[ins_i, f_i] = gt_mask.shape[1] - \
