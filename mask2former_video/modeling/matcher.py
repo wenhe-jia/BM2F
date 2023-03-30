@@ -204,7 +204,10 @@ def calculate_similarity_cost_video(
     :return:
     """
     # only use pairwise color similarities inside the GT box
-    tgt_similarities = (tgt_similarities >= color_thr).float() * tgt_box_mask[:, :, None].float()  # (G, T, k*k-1, H, W)
+    try:
+        tgt_similarities = (tgt_similarities >= color_thr).float() * tgt_box_mask[:, :, None].float()  # (G, T, k*k-1, H, W)
+    except:
+        print(tgt_similarities.shape, tgt_box_mask.shape)
 
     # Prepare data for pairwise loss
     log_fg_prob = F.logsigmoid(out_mask)  # (Q, T, H, W)
@@ -308,8 +311,8 @@ class VideoHungarianMatcherProjPair(nn.Module):
                 with autocast(enabled=False):
                     ##### projection #####
                     # original projection
-                    cost_projection = batch_axis_projection(out_mask, tgt_box_mask, 3) +  \
-                                      batch_axis_projection(out_mask, tgt_box_mask, 2)
+                    cost_projection = batch_axis_projection(out_mask, tgt_boxmask, 3) +  \
+                                      batch_axis_projection(out_mask, tgt_boxmask, 2)
                     # # projection limited label
                     # cost_projection = \
                     #     batch_axis_projection_limited_label(
