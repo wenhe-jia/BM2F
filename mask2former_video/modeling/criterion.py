@@ -372,10 +372,6 @@ class VideoSetCriterionProjPair(nn.Module):
             """
                 bellow is for original projection loss
             """
-            # project mask to x & y axis
-            # masks_x: (num_ins, T, H_pad/4, W_pad/4)->(num_ins, T, H_pad, 1)->(num_ins, T*H_pad)
-            # masks_y: (num_ins, T, H_pad/4, W_pad/4)->(num_ins, T, 1, W_pad)->(num_ins, T*W_pad)
-
             src_masks_y = src_masks.max(dim=3, keepdim=True)[0].flatten(1)
             src_masks_x = src_masks.max(dim=2, keepdim=True)[0].flatten(1)
 

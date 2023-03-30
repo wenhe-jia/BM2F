@@ -297,7 +297,7 @@ class VideoHungarianMatcherProjPair(nn.Module):
             out_mask = outputs["pred_masks"][b]  # (Q, T, H, W)
 
             # gt masks are already padded when preparing target
-            tgt_box_mask = targets[b]["box_masks"].to(out_mask)  # (G, T, H, W), 有可能有空的mask(dummy)
+            tgt_boxmask = targets[b]["box_masks"].to(out_mask)  # (G, T, H, W), 有可能有空的mask(dummy)
             tgt_left_bounds = targets[b]["left_bounds"].to(out_mask)  # (G, T, H)
             tgt_right_bounds = targets[b]["right_bounds"].to(out_mask)  # (G, T, H)
             tgt_top_bounds = targets[b]["top_bounds"].to(out_mask)  # (G, T, W)
@@ -322,7 +322,7 @@ class VideoHungarianMatcherProjPair(nn.Module):
                     ##### color similarity #####
                     warmup_factor = min(self._iter.item() / float(self.pairwise_warmup_iters), 1.0)
                     cost_pairwise = calculate_similarity_cost_video(
-                        out_mask, tgt_box_mask, tgt_similarities,
+                        out_mask, tgt_boxmask, tgt_similarities,
                         self.pairwise_color_thresh, self.pairwise_size, self.pairwise_dilation
                     ) * warmup_factor
             else:
