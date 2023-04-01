@@ -204,10 +204,8 @@ def calculate_similarity_cost_video(
     :return:
     """
     # only use pairwise color similarities inside the GT box
-    try:
-        tgt_similarities = (tgt_similarities >= color_thr).float() * tgt_box_mask[:, :, None].float()  # (G, T, k*k-1, H, W)
-    except:
-        print(tgt_similarities.shape, tgt_box_mask.shape)
+    assert len(tgt_box_mask.shape) == 4
+    tgt_similarities = (tgt_similarities >= color_thr).float() * tgt_box_mask[:, :, None].float()  # (G, T, k*k-1, H, W)
 
     # Prepare data for pairwise loss
     log_fg_prob = F.logsigmoid(out_mask)  # (Q, T, H, W)

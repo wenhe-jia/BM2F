@@ -449,7 +449,7 @@ class VideoMaskFormer(nn.Module):
                     "right_bounds": right_bounds_per_video[valid_idx].float(),
                     "top_bounds": top_bounds_per_video[valid_idx].float(),
                     "bottom_bounds": bottom_bounds_per_video[valid_idx].float(),
-                    "color_similarities": color_similarity_per_video.float(),
+                    "color_similarities": color_similarity_per_video[valid_idx].float(),
                 }
             )
         return gt_instances

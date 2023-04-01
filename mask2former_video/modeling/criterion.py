@@ -310,19 +310,23 @@ class VideoSetCriterionProjPair(nn.Module):
             [t['color_similarities'][i] for t, (_, i) in zip(targets, indices)]
         )  # (N, T, k*k-1, H, W)
 
-        with torch.no_grad():
-            target_similarities = (target_similarities >= self.pairwise_color_thresh).float() * \
-                                  target_boxmasks[:, :, None].float()
-        del target_boxmasks
+        if src_idx[0].shape[0] > 0:
+            with torch.no_grad():
+                target_similarities = (target_similarities >= self.pairwise_color_thresh).float() * \
+                                      target_boxmasks[:, :, None].float()
 
-        src_similarities = calculate_pred_similaries_video(src_masks, self.pairwise_size, self.pairwise_dilation)
+            src_similarities = calculate_pred_similaries_video(src_masks, self.pairwise_size, self.pairwise_dilation)
+
+            warmup_factor = min(self._iter.item() / float(self.pairwise_warmup_iters), 1.0)
+            losses = {
+                "loss_mask_pairwise": pairwise_loss_jit(src_similarities, target_similarities, num_masks) * warmup_factor
+            }
+        else:
+            losses = {"loss_mask_pairwise": torch.tensor([0], dtype=torch.float32, device=src_masks.device)}
+
+
         del src_masks
-
-        warmup_factor = min(self._iter.item() / float(self.pairwise_warmup_iters), 1.0)
-        losses = {
-            "loss_mask_pairwise": pairwise_loss_jit(src_similarities, target_similarities, num_masks) * warmup_factor
-        }
-
+        del target_boxmasks
         del target_similarities
         return losses
 
@@ -420,9 +424,7 @@ class VideoSetCriterionProjPair(nn.Module):
             """
             bellow is for original projection loss and limited projection loss
             """
-            losses = {
-                "loss_mask_projection": torch.tensor([0], dtype=torch.float32, device=src_masks.device),
-            }
+            losses = {"loss_mask_projection": torch.tensor([0], dtype=torch.float32, device=src_masks.device)}
 
         del src_masks
         del target_boxmasks
