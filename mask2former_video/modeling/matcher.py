@@ -434,17 +434,17 @@ class VideoHungarianMatcherProj(nn.Module):
             if tgt_ids.shape[0] > 0:
                 with autocast(enabled=False):
                     # original projection
-                    # cost_projection = batch_axis_projection(out_mask, tgt_boxmask, 3) + \
-                    #                   batch_axis_projection(out_mask, tgt_boxmask, 2)
+                    cost_projection = batch_axis_projection(out_mask, tgt_boxmask, 3) + \
+                                      batch_axis_projection(out_mask, tgt_boxmask, 2)
 
                     # projection limited label
-                    cost_projection = \
-                        batch_axis_projection_limited_label(
-                            out_mask, tgt_boxmask, tgt_left_bounds, tgt_right_bounds, axis=-1
-                        ) + \
-                        batch_axis_projection_limited_label(
-                            out_mask, tgt_boxmask, tgt_top_bounds, tgt_bottom_bounds, axis=-2
-                        )
+                    # cost_projection = \
+                    #     batch_axis_projection_limited_label(
+                    #         out_mask, tgt_boxmask, tgt_left_bounds, tgt_right_bounds, axis=-1
+                    #     ) + \
+                    #     batch_axis_projection_limited_label(
+                    #         out_mask, tgt_boxmask, tgt_top_bounds, tgt_bottom_bounds, axis=-2
+                    #     )
             else:
                 cost_projection = torch.zeros((100, 0), dtype=torch.float32, device=out_prob.device)
 

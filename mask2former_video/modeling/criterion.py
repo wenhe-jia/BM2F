@@ -20,7 +20,7 @@ from mask2former.utils.misc import is_dist_avail_and_initialized
 
 from ..utils.weaksup_utils import unfold_wo_center
 
-import os, cv2
+import os, cv2, copy
 import numpy as np
 
 
@@ -241,7 +241,10 @@ class VideoSetCriterionProjPair(nn.Module):
             # below for mask update
             update_mask,
             mask_update_steps,
-            update_pix_thrs
+            update_pix_thrs,
+            conf_type,
+            static_conf_thr,
+            max_iter
     ):
         """Create the criterion.
         Parameters:
@@ -265,6 +268,9 @@ class VideoSetCriterionProjPair(nn.Module):
         self.update_masks = update_mask
         self.mask_update_steps = mask_update_steps
         self.update_pix_thrs = update_pix_thrs
+        self.conf_type = conf_type
+        self.static_conf_thr = static_conf_thr
+        self.max_iter = max_iter
         assert len(self.mask_update_steps) == len(self.update_pix_thrs) + 1
 
         empty_weight = torch.ones(self.num_classes + 1)
@@ -452,17 +458,29 @@ class VideoSetCriterionProjPair(nn.Module):
         return loss_map[loss](outputs, targets, indices, num_masks)
 
     @torch.no_grad()
-    def update_targets(self, src_probs_per_batch, targets_per_batch, indices_per_batch, pix_thr=0.3, overlap_thr=0.0):
+    def update_targets(
+            self,
+            src_per_batch,
+            targets_per_batch,
+            indices_per_batch,
+            conf_thr=0.5,
+            pix_thr=0.3,
+    ):
         """
         indices_curr_lvl: [(tensor(G,), tensor(G,))] x num_img
         """
-        src_probs_per_batch = src_probs_per_batch["pred_masks"]  # (B, Q, T, H, W)
-        B = src_probs_per_batch.shape[0]
-        T = src_probs_per_batch.shape[2]
-        src_probs_per_batch = src_probs_per_batch.split(B, 0)[0]  # 【(Q, T, H, W)] x B
+        src_scores_per_batch = F.softmax(src_per_batch["pred_logits"], dim=-1)[:, :-1]  # (B, Q, C)
+        src_mask_probs_per_batch = src_per_batch["pred_masks"].sigmoid()  # (B, Q, T, H, W)
+        B = src_mask_probs_per_batch.shape[0]
+        T = src_mask_probs_per_batch.shape[2]
+        src_scores_per_batch = src_scores_per_batch.split(B, 0)[0]  # [(Q, C)] x B
+        src_mask_probs_per_batch = src_mask_probs_per_batch.split(B, 0)[0]  # [(Q, T, H, W)] x B
 
         new_targets = []
-        for indice, src_probs, targets in zip(indices_per_batch, src_probs_per_batch, targets_per_batch):
+        for indice, src_scores, src_mask_probs, targets in zip(
+            indices_per_batch, src_scores_per_batch, src_mask_probs_per_batch, targets_per_batch
+        ):
+            gt_classes = targets["labels"]  # (G,)
             box_masks = targets["box_masks"]  # (G, T, H, W)
             left_bounds = targets["left_bounds"]  # (G, T, H)
             right_bounds = targets["right_bounds"]  # (G, T, H)
@@ -476,12 +494,20 @@ class VideoSetCriterionProjPair(nn.Module):
             new_bottom_bounds = torch.zeros_like(bottom_bounds)
 
             for src_idx, tgt_idx in zip(indice[0], indice[1]):
-                new_box_mask = (src_probs[src_idx].sigmoid() >= pix_thr) * box_masks[tgt_idx]  # (T, H, W)
+                cls_score = src_scores[src_idx, gt_classes[tgt_idx]]
+                # new_box_masks = (src_mask_probs[src_idx] >= pix_thr) * box_masks[tgt_idx]  # (T, H, W)
 
-                if new_box_masks[tgt_idx].sum() >= overlap_thr:
-                    new_box_masks[tgt_idx] = new_box_mask
+                # if new_box_masks[tgt_idx].sum() >= overlap_thr:
+                #     new_box_masks[tgt_idx] = new_box_mask
 
-                    for f_i in range(T):
+                for f_i in range(T):
+                    mask_probs = src_mask_probs[src_idx, f_i]
+                    # mask_probs = mask_probs * box_masks[tgt_idx, f_i]  # 框内算pix_score
+                    pix_score = (mask_probs * (mask_probs > 0.5).float()).sum() / \
+                                ((mask_probs > 0.5).float().sum() + 1e-6)
+
+                    if torch.pow(cls_score * pix_score, 2) >= quality_thr:
+                        new_box_masks[tgt_idx, f_i] = (mask_probs > 0.5) * box_masks[tgt_idx, f_i]
                         # bounds for y projection
                         new_left_bounds[tgt_idx, f_i] = torch.argmax(new_box_masks[tgt_idx, f_i], dim=1)
                         new_right_bounds[tgt_idx, f_i] = new_box_masks[tgt_idx, f_i].shape[1] - \
@@ -490,12 +516,12 @@ class VideoSetCriterionProjPair(nn.Module):
                         new_top_bnounds[tgt_idx, f_i] = torch.argmax(new_box_masks[tgt_idx, f_i], dim=0)
                         new_bottom_bounds[tgt_idx, f_i] = new_box_masks[tgt_idx, f_i].shape[0] - \
                                                      torch.argmax(new_box_masks[tgt_idx, f_i].flip(0), dim=0)
-                else:
-                    new_box_masks[tgt_idx] = box_masks[tgt_idx]
-                    new_left_bounds[tgt_idx] = left_bounds[tgt_idx]
-                    new_right_bounds[tgt_idx] = right_bounds[tgt_idx]
-                    new_top_bnounds[tgt_idx] = top_bounds[tgt_idx]
-                    new_bottom_bounds[tgt_idx] = bottom_bounds[tgt_idx]
+                    else:
+                        new_box_masks[tgt_idx, f_i] = box_masks[tgt_idx, f_i]
+                        new_left_bounds[tgt_idx, f_i] = left_bounds[tgt_idx, f_i]
+                        new_right_bounds[tgt_idx, f_i] = right_bounds[tgt_idx, f_i]
+                        new_top_bnounds[tgt_idx, f_i] = top_bounds[tgt_idx, f_i]
+                        new_bottom_bounds[tgt_idx, f_i] = bottom_bounds[tgt_idx, f_i]
 
             targets["box_masks"] = new_box_masks
             targets["left_bounds"] = new_left_bounds
@@ -526,16 +552,12 @@ class VideoSetCriterionProjPair(nn.Module):
             # Compute all the requested losses
             losses = {}
 
-            # pix_thrs = [0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10]
-            # pix_thrs = [0.30, 0.30, 0.30, 0.30, 0.30, 0.30, 0.30, 0.30, 0.30]
-            # pix_thrs = [0.50, 0.50, 0.50, 0.50, 0.50, 0.50, 0.50, 0.50, 0.50]
-            # pix_thrs = [0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50]
             # calculate mask update pix thr
-            thr_ind = 0
-            for ind in range(len(self.mask_update_steps) - 1):
-                if self._iter >= self.mask_update_steps[ind] and self._iter < self.mask_update_steps[ind + 1]:
-                    thr_ind = ind
-            pix_thr = self.update_pix_thrs[thr_ind]
+            # thr_ind = 0
+            # for ind in range(len(self.mask_update_steps) - 1):
+            #     if self._iter >= self.mask_update_steps[ind] and self._iter < self.mask_update_steps[ind + 1]:
+            #         thr_ind = ind
+            # pix_thr = self.update_pix_thrs[thr_ind]
 
             # compute loss of auxiliary decoder layer
             # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
@@ -547,7 +569,13 @@ class VideoSetCriterionProjPair(nn.Module):
                         l_dict = {k + f"_{i}": v for k, v in l_dict.items()}
                         losses.update(l_dict)
                     # update targets after curr lvl loss calculation
-                    targets = self.update_targets(aux_outputs, targets, indices, pix_thr=pix_thr)
+                    if self.conf_type == "static":
+                        conf_thr = self.static_conf_thr
+                    elif self.conf_type == "dynamic":
+                        conf_thr = 1 / (1 + np.exp(-2 * (1 - self._iter / self.max_iter)))
+                    else:
+                        raise Exception("Unknown update type !!!")
+                    targets = self.update_targets(aux_outputs, targets, indices, conf_thr=conf_thr)
 
             # compute los of final decoder layer
             outputs_without_aux = {k: v for k, v in outputs.items() if k != "aux_outputs"}
@@ -617,7 +645,10 @@ class VideoSetCriterionProj(nn.Module):
             # below for mask update
             update_mask,
             mask_update_steps,
-            update_pix_thrs
+            update_pix_thrs,
+            conf_type,
+            static_conf_thr,
+            max_iter
     ):
         """Create the criterion.
         Parameters:
@@ -637,6 +668,9 @@ class VideoSetCriterionProj(nn.Module):
         self.update_masks = update_mask
         self.mask_update_steps = mask_update_steps
         self.update_pix_thrs = update_pix_thrs
+        self.conf_type = conf_type
+        self.static_conf_thr = static_conf_thr
+        self.max_iter = max_iter
         assert len(self.mask_update_steps) == len(self.update_pix_thrs) + 1
 
         empty_weight = torch.ones(self.num_classes + 1)
@@ -702,42 +736,39 @@ class VideoSetCriterionProj(nn.Module):
                 bellow is for original projection loss
             """
             # project mask to x & y axis
-            # masks_x: (num_ins, T, H_pad/4, W_pad/4)->(num_ins, T, H_pad, 1)->(num_ins, T*H_pad)
-            # masks_y: (num_ins, T, H_pad/4, W_pad/4)->(num_ins, T, 1, W_pad)->(num_ins, T*W_pad)
+            src_masks_y = src_masks.max(dim=3, keepdim=True)[0].flatten(1)
+            src_masks_x = src_masks.max(dim=2, keepdim=True)[0].flatten(1)
 
-            # src_masks_y = src_masks.max(dim=3, keepdim=True)[0].flatten(1)
-            # src_masks_x = src_masks.max(dim=2, keepdim=True)[0].flatten(1)
-            #
-            # with torch.no_grad():
-            #     target_boxmasks_y = target_boxmasks.max(dim=3, keepdim=True)[0].flatten(1)
-            #     target_boxmasks_x = target_boxmasks.max(dim=2, keepdim=True)[0].flatten(1)
+            with torch.no_grad():
+                target_boxmasks_y = target_boxmasks.max(dim=3, keepdim=True)[0].flatten(1)
+                target_boxmasks_x = target_boxmasks.max(dim=2, keepdim=True)[0].flatten(1)
 
             """
                 bellow is for projection limited label loss
             """
-            NT = src_masks.shape[0]
-            H = src_masks.shape[2]
-            W = src_masks.shape[3]
-
-            src_masks_y, max_inds_x = src_masks.max(dim=3, keepdim=True)  # (NT, 1, H, 1), (NT, 1, H, 1)
-            src_masks_x, max_inds_y = src_masks.max(dim=2, keepdim=True)  # (NT, 1, 1, W), (NT, 1, 1, W)
-
-            src_masks_y = src_masks_y.flatten(1)  # (NT, H)
-            src_masks_x = src_masks_x.flatten(1)  # (NT, W)
-            max_inds_x = max_inds_x.flatten()  # (NTW)
-            max_inds_y = max_inds_y.flatten()  # (NTH)
-
-            with torch.no_grad():
-                flag_l = max_inds_x >= target_left_bounds
-                flag_r = max_inds_x < target_right_bounds
-                flag_y = (flag_l * flag_r).view(NT, H)
-
-                flag_t = max_inds_y >= target_top_bounds
-                flag_b = max_inds_y < target_bottom_bounds
-                flag_x = (flag_t * flag_b).view(NT, W)
-
-                target_boxmasks_y = target_boxmasks.max(dim=3, keepdim=True)[0].flatten(1) * flag_y  # (NT, W)
-                target_boxmasks_x = target_boxmasks.max(dim=2, keepdim=True)[0].flatten(1) * flag_x  # (NT, H)
+            # NT = src_masks.shape[0]
+            # H = src_masks.shape[2]
+            # W = src_masks.shape[3]
+            #
+            # src_masks_y, max_inds_x = src_masks.max(dim=3, keepdim=True)  # (NT, 1, H, 1), (NT, 1, H, 1)
+            # src_masks_x, max_inds_y = src_masks.max(dim=2, keepdim=True)  # (NT, 1, 1, W), (NT, 1, 1, W)
+            #
+            # src_masks_y = src_masks_y.flatten(1)  # (NT, H)
+            # src_masks_x = src_masks_x.flatten(1)  # (NT, W)
+            # max_inds_x = max_inds_x.flatten()  # (NTW)
+            # max_inds_y = max_inds_y.flatten()  # (NTH)
+            #
+            # with torch.no_grad():
+            #     flag_l = max_inds_x >= target_left_bounds
+            #     flag_r = max_inds_x < target_right_bounds
+            #     flag_y = (flag_l * flag_r).view(NT, H)
+            #
+            #     flag_t = max_inds_y >= target_top_bounds
+            #     flag_b = max_inds_y < target_bottom_bounds
+            #     flag_x = (flag_t * flag_b).view(NT, W)
+            #
+            #     target_boxmasks_y = target_boxmasks.max(dim=3, keepdim=True)[0].flatten(1) * flag_y  # (NT, W)
+            #     target_boxmasks_x = target_boxmasks.max(dim=2, keepdim=True)[0].flatten(1) * flag_x  # (NT, H)
 
             losses = {
                 "loss_mask_projection": projection2D_dice_loss_jit(
@@ -782,17 +813,29 @@ class VideoSetCriterionProj(nn.Module):
         return loss_map[loss](outputs, targets, indices, num_masks)
 
     @torch.no_grad()
-    def update_targets(self, src_probs_per_batch, targets_per_batch, indices_per_batch, pix_thr=0.3, overlap_thr=0.0):
+    def update_targets(
+            self,
+            src_per_batch,
+            targets_per_batch,
+            indices_per_batch,
+            conf_thr=0.5,
+            pix_thr=0.3,
+    ):
         """
         indices_curr_lvl: [(tensor(G,), tensor(G,))] x num_img
         """
-        src_probs_per_batch = src_probs_per_batch["pred_masks"]  # (B, Q, T, H, W)
-        B = src_probs_per_batch.shape[0]
-        T = src_probs_per_batch.shape[2]
-        src_probs_per_batch = src_probs_per_batch.split(B, 0)[0]  # 【(Q, T, H, W)] x B
+        src_scores_per_batch = F.softmax(src_per_batch["pred_logits"], dim=-1)  # (B, Q, C+1), C+1 i for dummy gt
+        src_mask_probs_per_batch = src_per_batch["pred_masks"].sigmoid()  # (B, Q, T, H, W)
+        B = src_mask_probs_per_batch.shape[0]
+        T = src_mask_probs_per_batch.shape[2]
+        src_scores_per_batch = src_scores_per_batch.split(B, 0)[0]  # [(Q, C)] x B
+        src_mask_probs_per_batch = src_mask_probs_per_batch.split(B, 0)[0]  # [(Q, T, H, W)] x B
 
         new_targets = []
-        for indice, src_probs, targets in zip(indices_per_batch, src_probs_per_batch, targets_per_batch):
+        for indice, src_scores, src_mask_probs, targets in zip(
+            indices_per_batch, src_scores_per_batch, src_mask_probs_per_batch, targets_per_batch
+        ):
+            gt_classes = targets["labels"]  # (G,)
             box_masks = targets["box_masks"]  # (G, T, H, W)
             left_bounds = targets["left_bounds"]  # (G, T, H)
             right_bounds = targets["right_bounds"]  # (G, T, H)
@@ -806,12 +849,16 @@ class VideoSetCriterionProj(nn.Module):
             new_bottom_bounds = torch.zeros_like(bottom_bounds)
 
             for src_idx, tgt_idx in zip(indice[0], indice[1]):
-                new_box_mask = (src_probs[src_idx].sigmoid() >= pix_thr) * box_masks[tgt_idx]  # (T, H, W)
+                cls_score = src_scores[src_idx, gt_classes[tgt_idx]]
 
-                if new_box_masks[tgt_idx].sum() >= overlap_thr:
-                    new_box_masks[tgt_idx] = new_box_mask
+                for f_i in range(T):
+                    mask_probs = src_mask_probs[src_idx, f_i]
+                    # mask_probs = mask_probs * box_masks[tgt_idx, f_i]  # 框内算pix_score
+                    pix_score = (mask_probs * (mask_probs > 0.5).float()).sum() / \
+                                ((mask_probs > 0.5).float().sum() + 1e-6)
 
-                    for f_i in range(T):
+                    if torch.pow(cls_score * pix_score, 0.5) >= conf_thr:
+                        new_box_masks[tgt_idx, f_i] = (mask_probs > 0.5) * box_masks[tgt_idx, f_i]
                         # bounds for y projection
                         new_left_bounds[tgt_idx, f_i] = torch.argmax(new_box_masks[tgt_idx, f_i], dim=1)
                         new_right_bounds[tgt_idx, f_i] = new_box_masks[tgt_idx, f_i].shape[1] - \
@@ -820,12 +867,12 @@ class VideoSetCriterionProj(nn.Module):
                         new_top_bnounds[tgt_idx, f_i] = torch.argmax(new_box_masks[tgt_idx, f_i], dim=0)
                         new_bottom_bounds[tgt_idx, f_i] = new_box_masks[tgt_idx, f_i].shape[0] - \
                                                      torch.argmax(new_box_masks[tgt_idx, f_i].flip(0), dim=0)
-                else:
-                    new_box_masks[tgt_idx] = box_masks[tgt_idx]
-                    new_left_bounds[tgt_idx] = left_bounds[tgt_idx]
-                    new_right_bounds[tgt_idx] = right_bounds[tgt_idx]
-                    new_top_bnounds[tgt_idx] = top_bounds[tgt_idx]
-                    new_bottom_bounds[tgt_idx] = bottom_bounds[tgt_idx]
+                    else:
+                        new_box_masks[tgt_idx, f_i] = box_masks[tgt_idx, f_i]
+                        new_left_bounds[tgt_idx, f_i] = left_bounds[tgt_idx, f_i]
+                        new_right_bounds[tgt_idx, f_i] = right_bounds[tgt_idx, f_i]
+                        new_top_bnounds[tgt_idx, f_i] = top_bounds[tgt_idx, f_i]
+                        new_bottom_bounds[tgt_idx, f_i] = bottom_bounds[tgt_idx, f_i]
 
             targets["box_masks"] = new_box_masks
             targets["left_bounds"] = new_left_bounds
@@ -861,16 +908,12 @@ class VideoSetCriterionProj(nn.Module):
             # Compute all the requested losses
             losses = {}
 
-            # pix_thrs = [0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10]
-            # pix_thrs = [0.30, 0.30, 0.30, 0.30, 0.30, 0.30, 0.30, 0.30, 0.30]
-            # pix_thrs = [0.50, 0.50, 0.50, 0.50, 0.50, 0.50, 0.50, 0.50, 0.50]
-            # pix_thrs = [0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50]
             # calculate mask update pix thr
-            thr_ind = 0
-            for ind in range(len(self.mask_update_steps) - 1):
-                if self._iter >= self.mask_update_steps[ind] and self._iter < self.mask_update_steps[ind + 1]:
-                    thr_ind = ind
-            pix_thr = self.update_pix_thrs[thr_ind]
+            # thr_ind = 0
+            # for ind in range(len(self.mask_update_steps) - 1):
+            #     if self._iter >= self.mask_update_steps[ind] and self._iter < self.mask_update_steps[ind + 1]:
+            #         thr_ind = ind
+            # pix_thr = self.update_pix_thrs[thr_ind]
 
             # compute loss of auxiliary decoder layer
             # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
@@ -882,7 +925,13 @@ class VideoSetCriterionProj(nn.Module):
                         l_dict = {k + f"_{i}": v for k, v in l_dict.items()}
                         losses.update(l_dict)
                     # update targets after curr lvl loss calculation
-                    targets = self.update_targets(aux_outputs, targets, indices, pix_thr=pix_thr)
+                    if self.conf_type == "static":
+                        conf_thr = self.static_conf_thr
+                    elif self.conf_type == "dynamic":
+                        conf_thr = 1 / (1 + torch.exp(-2 * (1 - self._iter / self.max_iter)))
+                    else:
+                        raise Exception("Unknown update type !!!")
+                    targets = self.update_targets(aux_outputs, targets, indices, conf_thr=conf_thr)
 
             # compute los of final decoder layer
             outputs_without_aux = {k: v for k, v in outputs.items() if k != "aux_outputs"}
