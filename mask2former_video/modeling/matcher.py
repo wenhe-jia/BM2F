@@ -168,15 +168,15 @@ def batch_axis_projection_limited_label(
 #############################################
 def batch_pairwise_loss(inputs: torch.Tensor, targets: torch.Tensor):
     """
-    :param inputs: (num_query, k*k-1, H/4, W/4)
-    :param targets: (num_gt, k*k-1, H/4, W/4)
-    :return: cost matrix: (num_query, num_gt)
+    :param inputs: (Q, T, k*k-1, H, W)
+    :param targets: (G, T, k*k-1, H, W)
+    :return: cost matrix: (Q, G)
     """
     inputs = inputs.flatten(1)
     targets = targets.flatten(1)
 
     numerator = torch.einsum("nc,mc->nm", inputs, targets)
-    denominator = targets.sum(dim=1)[None, :].clamp(min=1.0)  # (1, num_gt)
+    denominator = targets.sum(dim=1)[None, :].clamp(min=1.0)  # (1, G)
     loss = numerator / denominator
     return loss
 
@@ -270,9 +270,6 @@ class VideoHungarianMatcherProjPair(nn.Module):
         self.pairwise_color_thresh = pairwise_color_thresh
         self.pairwise_warmup_iters = pairwise_warmup_iters
 
-        # self.point_sample = point_sample
-        # self.num_points = num_points
-
         assert cost_class != 0 or cost_projection != 0 or cost_pairwise != 0, "all costs cant be 0"
 
         # for pairwise loss warmup
@@ -296,6 +293,7 @@ class VideoHungarianMatcherProjPair(nn.Module):
             cost_class = -out_prob[:, tgt_ids]
 
             out_mask = outputs["pred_masks"][b]  # (Q, T, H, W)
+            T = out_mask.shape[1]
 
             # gt masks are already padded when preparing target
             tgt_boxmask = targets[b]["box_masks"].to(out_mask)  # (G, T, H, W), 有可能有空的mask(dummy)
@@ -322,13 +320,15 @@ class VideoHungarianMatcherProjPair(nn.Module):
 
                     ##### color similarity #####
                     warmup_factor = min(self._iter.item() / float(self.pairwise_warmup_iters), 1.0)
-                    cost_pairwise = calculate_similarity_cost_video(
-                        out_mask, tgt_boxmask, tgt_similarities,
-                        self.pairwise_color_thresh, self.pairwise_size, self.pairwise_dilation
+                    cost_pairwise = (
+                        calculate_similarity_cost_video(
+                            out_mask, tgt_boxmask, tgt_similarities,
+                            self.pairwise_color_thresh, self.pairwise_size, self.pairwise_dilation
+                        ) / T
                     ) * warmup_factor
             else:
-                cost_projection = torch.zeros((100, 0), dtype=torch.float32, device=out_prob.device)
-                cost_pairwise = torch.zeros((100, 0), dtype=torch.float32, device=out_prob.device)
+                cost_projection = torch.zeros((num_queries, 0), dtype=torch.float32, device=out_prob.device)
+                cost_pairwise = torch.zeros((num_queries, 0), dtype=torch.float32, device=out_prob.device)
 
             # Final cost matrix
             C = (
@@ -446,7 +446,7 @@ class VideoHungarianMatcherProj(nn.Module):
                     #         out_mask, tgt_boxmask, tgt_top_bounds, tgt_bottom_bounds, axis=-2
                     #     )
             else:
-                cost_projection = torch.zeros((100, 0), dtype=torch.float32, device=out_prob.device)
+                cost_projection = torch.zeros((num_queries, 0), dtype=torch.float32, device=out_prob.device)
 
             # Final cost matrix
             C = (self.cost_class * cost_class + self.cost_projection * cost_projection)  # (num_query, num_gt)

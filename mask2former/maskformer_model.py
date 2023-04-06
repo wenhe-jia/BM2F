@@ -197,7 +197,7 @@ class MaskFormer(nn.Module):
         elif supervision_type == "mask_projection_and_pairwise":
             matcher = HungarianMatcherProjPair(
                 cost_class=cfg.MODEL.MASK_FORMER.CLASS_WEIGHT,
-                cost_projection=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_PROJECTION_WEIGHT,
+                cost_projection=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PROJECTION_WEIGHT,
                 cost_pairwise=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE_WEIGHT,
                 pairwise_size=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.SIZE,
                 pairwise_dilation=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.DILATION,
@@ -422,13 +422,16 @@ class MaskFormer(nn.Module):
         downsampled_images = F.avg_pool2d(
             original_images.float(), kernel_size=stride,
             stride=stride, padding=0
-        )[:, [2, 1, 0]]  # (N, 3, H, W) --> (N, 3, H/4, W/4) --> (N, W/4, H/4, 3)
-        downsampled_image_masks = original_image_masks[:, start::stride, start::stride]  # (N, H/4, W/4), do not use interpolate to ensure org pixel
+        )  # (N, 3, H, W) --> (N, 3, H/4, W/4)
+        # [:, [2, 1, 0]]   --> switch channel
+        # (N, H/4, W/4), do not use interpolate to ensure org pixel
+        downsampled_image_masks = original_image_masks[:, start::stride, start::stride]
 
         h_pad, w_pad = original_images.shape[-2:]
         new_targets = []  # store targets of each image
         for im_ind, targets_per_image in enumerate(targets):
-            images_lab = color.rgb2lab(downsampled_images[im_ind].byte().permute(1, 2, 0).cpu().numpy()[:, :, ::-1])  # (H/4, W/4, 3)
+            # (H/4, W/4, 3), [:, :, ::-1]
+            images_lab = color.rgb2lab(downsampled_images[im_ind].byte().permute(1, 2, 0).cpu().numpy())
             images_lab = torch.as_tensor(images_lab, device=downsampled_images.device, dtype=torch.float32)
             images_lab = images_lab.permute(2, 0, 1)[None]  # (1, 3, H/4, W/4)
             images_color_similarity = get_images_color_similarity(

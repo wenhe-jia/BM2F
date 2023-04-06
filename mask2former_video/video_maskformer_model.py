@@ -364,7 +364,8 @@ class VideoMaskFormer(nn.Module):
             stride=stride, padding=0
         )
         _h, _w = downsampled_images.shape[-2:]
-        downsampled_images = downsampled_images.view(B, T, 3, _h, _w)[:, :, [2, 1, 0]]
+        # (B * T, 3, H/4, W/4) --> (B, T, 3, W/4, H/4) --> (B, T, W/4, H/4, 3)
+        downsampled_images = downsampled_images.view(B, T, 3, _h, _w)
         # (B*T, H, W) -> (B*T, h/4, W/4) -> (B, T, H/4, W/4)
         downsampled_image_masks = org_image_masks[:, start::stride, start::stride].view(B, T, _h, _w)
 
@@ -383,25 +384,27 @@ class VideoMaskFormer(nn.Module):
             top_bounds_full_per_video = torch.zeros(y_bound_shape, dtype=torch.float32, device=self.device)
             bottom_bounds_full_per_video = torch.zeros(y_bound_shape, dtype=torch.float32, device=self.device)
 
+            color_similarity_shape = [_num_instance, T, self.pairwise_size * self.pairwise_size - 1, _h, _w]
+            color_similarity_per_video = torch.zeros(color_similarity_shape, dtype=torch.float32, device=self.device)
+
             # rectangle gt mask from boxes for mask projection loss
             # TODO: add images_color_similarity for pairwise loss
             gt_ids_per_video = []
-            color_similarity_per_video = []  # [(1, k*k-1, H/4, W/4)] * T
+            # color_similarity_per_video = []  # [(1, k*k-1, H/4, W/4)] * T
             for f_i, targets_per_frame in enumerate(targets_per_video["instances"]):
                 targets_per_frame = targets_per_frame.to(self.device)
                 gt_ids_per_video.append(targets_per_frame.gt_ids[:, None])  # [(num_ins, 1), (num_ins, 1)]
 
                 # color similarity
-                frame_lab = color.rgb2lab(
-                    downsampled_images[vid_ind, f_i].byte().permute(1, 2, 0).cpu().numpy()[:, :, ::-1]
-                )  # (H/4, W/4, 3)
+                # (H/4, W/4, 3)
+                frame_lab = color.rgb2lab(downsampled_images[vid_ind, f_i].byte().permute(1, 2, 0).cpu().numpy())
                 frame_lab = torch.as_tensor(frame_lab, device=downsampled_images.device, dtype=torch.float32)
                 frame_lab = frame_lab.permute(2, 0, 1)[None]  # (1, 3, H/4, W/4)
                 frame_color_similarity = get_images_color_similarity(
                     frame_lab, downsampled_image_masks[vid_ind, f_i],
                     self.pairwise_size, self.pairwise_dilation
                 )  # (1, k*k-1, H/4, W/4)
-                color_similarity_per_video.append(frame_color_similarity)
+                # color_similarity_per_video.append(frame_color_similarity)
 
                 # generate rectangle gt masks from boxes of shape (N, 4) in abs coordinates
                 if len(targets_per_frame) > 0:
@@ -421,6 +424,9 @@ class VideoMaskFormer(nn.Module):
                         bottom_bounds_full_per_video[ins_i, f_i] = gt_mask.shape[0] - \
                                                               torch.argmax(gt_mask.flip(0), dim=0)
 
+                        # color similarity for individual instance at current frame
+                        color_similarity_per_video[ins_i, f_i] = frame_color_similarity
+
             # (G, T, h_pad/4, w_pad/4)
             gt_boxmasks_per_video = gt_boxmasks_full_per_video[:, :, start::stride, start::stride]
             left_bounds_per_video = left_bounds_full_per_video[:, :, start::stride] / stride
@@ -429,17 +435,17 @@ class VideoMaskFormer(nn.Module):
             bottom_bounds_per_video = bottom_bounds_full_per_video[:, :, start::stride] / stride
 
             # [(1, k*k-1, h_pad/4, w_pad/4)] * T -> (T, k*k-1, h_pad/4, w_pad/4) -> (1, T, k*k-1, h_pad/4, w_pad/4)
-            color_similarity_per_video = torch.cat(color_similarity_per_video, dim=0)[None]
-            if _num_instance > 0:
-                # (1, T, k*k-1, h_pad/4, w_pad/4) -> (G, T, k*k-1, h_pad/4, w_pad/4)
-                color_similarity_per_video = torch.cat(
-                    [color_similarity_per_video for _ in range(_num_instance)], dim=0
-                )
-            else:
-                color_similarity_per_video = torch.zeros(
-                    (_num_instance, T, self.pairwise_size * self.pairwise_size - 1, _h, _w),
-                    dtype=torch.float32, device=self.device
-                )
+            # color_similarity_per_video = torch.cat(color_similarity_per_video, dim=0)[None]
+            # if _num_instance > 0:
+            #     # (1, T, k*k-1, h_pad/4, w_pad/4) -> (G, T, k*k-1, h_pad/4, w_pad/4)
+            #     color_similarity_per_video = torch.cat(
+            #         [color_similarity_per_video for _ in range(_num_instance)], dim=0
+            #     )
+            # else:
+            #     color_similarity_per_video = torch.zeros(
+            #         (_num_instance, T, self.pairwise_size * self.pairwise_size - 1, _h, _w),
+            #         dtype=torch.float32, device=self.device
+            #     )
 
             gt_ids_per_video = torch.cat(gt_ids_per_video, dim=1)  # (N, num_frame)
             valid_idx = (gt_ids_per_video != -1).any(dim=-1)  # (num_ins,), 别取到再所有帧上都是空的gt

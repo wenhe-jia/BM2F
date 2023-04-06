@@ -316,6 +316,8 @@ class VideoSetCriterionProjPair(nn.Module):
             [t['color_similarities'][i] for t, (_, i) in zip(targets, indices)]
         )  # (N, T, k*k-1, H, W)
 
+        T = src_masks.shape[1]
+
         if src_idx[0].shape[0] > 0:
             with torch.no_grad():
                 target_similarities = (target_similarities >= self.pairwise_color_thresh).float() * \
@@ -325,7 +327,8 @@ class VideoSetCriterionProjPair(nn.Module):
 
             warmup_factor = min(self._iter.item() / float(self.pairwise_warmup_iters), 1.0)
             losses = {
-                "loss_mask_pairwise": pairwise_loss_jit(src_similarities, target_similarities, num_masks) * warmup_factor
+                "loss_mask_pairwise":
+                    (pairwise_loss_jit(src_similarities, target_similarities, num_masks) / T) * warmup_factor
             }
         else:
             losses = {"loss_mask_pairwise": torch.tensor([0], dtype=torch.float32, device=src_masks.device)}
