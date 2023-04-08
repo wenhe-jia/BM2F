@@ -187,8 +187,8 @@ class VideoMaskFormer(nn.Module):
                     for x in cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_UPDATE.STEPS
                 ],
                 update_pix_thrs=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_UPDATE.PIX_THRS,
-                conf_type=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_UPDATE.CONF_TYPE,
-                static_conf_thr=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_UPDATE.STATIC_CONF_THR,
+                quality_type=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_UPDATE.CONF_TYPE,
+                static_quality_thr=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_UPDATE.STATIC_CONF_THR,
                 max_iter=cfg.SOLVER.MAX_ITER
             )
         elif supervision_type == "mask_projection_and_pairwise":
@@ -218,8 +218,8 @@ class VideoMaskFormer(nn.Module):
                     for x in cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_UPDATE.STEPS
                 ],
                 update_pix_thrs=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_UPDATE.PIX_THRS,
-                conf_type=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_UPDATE.CONF_TYPE,
-                static_conf_thr=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_UPDATE.STATIC_CONF_THR,
+                quality_type=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_UPDATE.QUALITY_TYPE,
+                static_quality_thr=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_UPDATE.STATIC_QUALITY_THR,
                 max_iter=cfg.SOLVER.MAX_ITER
             )
         else:

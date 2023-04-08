@@ -252,8 +252,8 @@ class VideoSetCriterionProjPair(nn.Module):
             update_mask,
             mask_update_steps,
             update_pix_thrs,
-            conf_type,
-            static_conf_thr,
+            quality_type,
+            static_quality_thr,
             max_iter
     ):
         """Create the criterion.
@@ -278,8 +278,8 @@ class VideoSetCriterionProjPair(nn.Module):
         self.update_masks = update_mask
         self.mask_update_steps = mask_update_steps
         self.update_pix_thrs = update_pix_thrs
-        self.conf_type = conf_type
-        self.static_conf_thr = static_conf_thr
+        self.quality_type = quality_type
+        self.static_quality_thr = static_quality_thr
         self.max_iter = max_iter
         assert len(self.mask_update_steps) == len(self.update_pix_thrs) + 1
 
@@ -474,8 +474,7 @@ class VideoSetCriterionProjPair(nn.Module):
             src_per_batch,
             targets_per_batch,
             indices_per_batch,
-            conf_thr=0.5,
-            pix_thr=0.3,
+            quality_thr=0.5,
     ):
         """
         indices_curr_lvl: [(tensor(G,), tensor(G,))] x num_img
@@ -580,13 +579,13 @@ class VideoSetCriterionProjPair(nn.Module):
                         l_dict = {k + f"_{i}": v for k, v in l_dict.items()}
                         losses.update(l_dict)
                     # update targets after curr lvl loss calculation
-                    if self.conf_type == "static":
-                        conf_thr = self.static_conf_thr
-                    elif self.conf_type == "dynamic":
-                        conf_thr = 1 / (1 + np.exp(-2 * (1 - self._iter / self.max_iter)))
+                    if self.quality_type == "static":
+                        quality_thr = self.static_quality_thr
+                    elif self.quality_type == "dynamic":
+                        quality_thr = 1 / (1 + torch.exp(-2 * (1 - self._iter / self.max_iter)))
                     else:
                         raise Exception("Unknown update type !!!")
-                    targets = self.update_targets(aux_outputs, targets, indices, conf_thr=conf_thr)
+                    targets = self.update_targets(aux_outputs, targets, indices, quality_thr=quality_thr)
 
             # compute los of final decoder layer
             outputs_without_aux = {k: v for k, v in outputs.items() if k != "aux_outputs"}
@@ -657,8 +656,8 @@ class VideoSetCriterionProj(nn.Module):
             update_mask,
             mask_update_steps,
             update_pix_thrs,
-            conf_type,
-            static_conf_thr,
+            quality_type,
+            static_quality_thr,
             max_iter
     ):
         """Create the criterion.
@@ -679,10 +678,10 @@ class VideoSetCriterionProj(nn.Module):
         self.update_masks = update_mask
         self.mask_update_steps = mask_update_steps
         self.update_pix_thrs = update_pix_thrs
-        self.conf_type = conf_type
-        self.static_conf_thr = static_conf_thr
-        self.max_iter = max_iter
         assert len(self.mask_update_steps) == len(self.update_pix_thrs) + 1
+        self.quality_type = quality_type
+        self.static_quality_thr = static_quality_thr
+        self.max_iter = max_iter
 
         empty_weight = torch.ones(self.num_classes + 1)
         empty_weight[-1] = self.eos_coef
@@ -829,8 +828,7 @@ class VideoSetCriterionProj(nn.Module):
             src_per_batch,
             targets_per_batch,
             indices_per_batch,
-            conf_thr=0.5,
-            pix_thr=0.3,
+            quality_thr=0.5,
     ):
         """
         indices_curr_lvl: [(tensor(G,), tensor(G,))] x num_img
@@ -868,7 +866,7 @@ class VideoSetCriterionProj(nn.Module):
                     pix_score = (mask_probs * (mask_probs > 0.5).float()).sum() / \
                                 ((mask_probs > 0.5).float().sum() + 1e-6)
 
-                    if torch.pow(cls_score * pix_score, 0.5) >= conf_thr:
+                    if torch.pow(cls_score * pix_score, 0.5) >= quality_thr:
                         new_box_masks[tgt_idx, f_i] = (mask_probs > 0.5) * box_masks[tgt_idx, f_i]
                         # bounds for y projection
                         new_left_bounds[tgt_idx, f_i] = torch.argmax(new_box_masks[tgt_idx, f_i], dim=1)
@@ -936,13 +934,13 @@ class VideoSetCriterionProj(nn.Module):
                         l_dict = {k + f"_{i}": v for k, v in l_dict.items()}
                         losses.update(l_dict)
                     # update targets after curr lvl loss calculation
-                    if self.conf_type == "static":
-                        conf_thr = self.static_conf_thr
-                    elif self.conf_type == "dynamic":
-                        conf_thr = 1 / (1 + torch.exp(-2 * (1 - self._iter / self.max_iter)))
+                    if self.quality_type == "static":
+                        quality_thr = self.static_quality_thr
+                    elif self.quality_type == "dynamic":
+                        quality_thr = 1 / (1 + torch.exp(-2 * (1 - self._iter / self.max_iter)))
                     else:
                         raise Exception("Unknown update type !!!")
-                    targets = self.update_targets(aux_outputs, targets, indices, conf_thr=conf_thr)
+                    targets = self.update_targets(aux_outputs, targets, indices, quality_thr=quality_thr)
 
             # compute los of final decoder layer
             outputs_without_aux = {k: v for k, v in outputs.items() if k != "aux_outputs"}
