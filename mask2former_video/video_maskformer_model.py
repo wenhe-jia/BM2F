@@ -365,9 +365,9 @@ class VideoMaskFormer(nn.Module):
         )
         _h, _w = downsampled_images.shape[-2:]
         # (B * T, 3, H/4, W/4) --> (B, T, 3, W/4, H/4) --> (B, T, W/4, H/4, 3)
-        downsampled_images = downsampled_images.view(B, T, 3, _h, _w)
+        downsampled_images = downsampled_images.reshape(B, T, 3, _h, _w)
         # (B*T, H, W) -> (B*T, h/4, W/4) -> (B, T, H/4, W/4)
-        downsampled_image_masks = org_image_masks[:, start::stride, start::stride].view(B, T, _h, _w)
+        downsampled_image_masks = org_image_masks[:, start::stride, start::stride].reshape(B, T, _h, _w)
 
         gt_instances = []
         for vid_ind, targets_per_video in enumerate(targets):
@@ -434,18 +434,14 @@ class VideoMaskFormer(nn.Module):
             top_bounds_per_video = top_bounds_full_per_video[:, :, start::stride] / stride
             bottom_bounds_per_video = bottom_bounds_full_per_video[:, :, start::stride] / stride
 
-            # [(1, k*k-1, h_pad/4, w_pad/4)] * T -> (T, k*k-1, h_pad/4, w_pad/4) -> (1, T, k*k-1, h_pad/4, w_pad/4)
-            # color_similarity_per_video = torch.cat(color_similarity_per_video, dim=0)[None]
-            # if _num_instance > 0:
-            #     # (1, T, k*k-1, h_pad/4, w_pad/4) -> (G, T, k*k-1, h_pad/4, w_pad/4)
-            #     color_similarity_per_video = torch.cat(
-            #         [color_similarity_per_video for _ in range(_num_instance)], dim=0
-            #     )
-            # else:
-            #     color_similarity_per_video = torch.zeros(
-            #         (_num_instance, T, self.pairwise_size * self.pairwise_size - 1, _h, _w),
-            #         dtype=torch.float32, device=self.device
-            #     )
+            assert gt_boxmasks_per_video.shape[2] * stride == h_pad
+            assert gt_boxmasks_per_video.shape[3] * stride == w_pad
+            assert left_bounds_per_video.shape[2] * stride == h_pad
+            assert right_bounds_per_video.shape[2] * stride == h_pad
+            assert top_bounds_per_video.shape[2] * stride == w_pad
+            assert bottom_bounds_per_video.shape[2] * stride == w_pad
+            assert color_similarity_per_video.shape[3] * stride == h_pad
+            assert color_similarity_per_video.shape[4] * stride == w_pad
 
             gt_ids_per_video = torch.cat(gt_ids_per_video, dim=1)  # (N, num_frame)
             valid_idx = (gt_ids_per_video != -1).any(dim=-1)  # (num_ins,), 别取到再所有帧上都是空的gt

@@ -1,7 +1,7 @@
 _BASE_: maskformer2_R50_bs16_12ep.yaml
 MODEL:
   MASK_FORMER:
-    SUP_TYPE: "projection_and_pairwise"
+    SUP_TYPE: "mask_projection_and_pairwise"
     WEAK_SUPERVISION:
       PAIRWISE:
         WARMUP_ITERS: 40000

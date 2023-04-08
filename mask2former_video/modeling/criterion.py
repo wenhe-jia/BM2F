@@ -182,7 +182,17 @@ def pairwise_loss(
         targets: torch.Tensor,
         num_masks: float,
 ):
-    loss_pairwise = (inputs * targets).sum() / targets.sum().clamp(min=1.0)
+    assert len(inputs.shape) == 5
+    assert len(targets.shape) == 5
+
+    # (N, T, k*k-1, H, W) --flatten--> (N, T, E) --sum--> (N, T)
+    numerator = (inputs.flatten(2) * targets.flatten(2)).sum(dim=2)
+    denominator = targets.flatten(2).sum(dim=2).clamp(min=1.0)
+
+    # (N, T) --mean(dim=1)--> (N,) --sum--> ()
+    loss_pairwise = (numerator / denominator).mean(1).sum()  # (N, T)
+
+    # _loss_pairwise = (inputs * targets).sum() / targets.sum().clamp(min=1.0)
     return loss_pairwise / num_masks
 
 
@@ -307,7 +317,7 @@ class VideoSetCriterionProjPair(nn.Module):
 
         src_idx = self._get_src_permutation_idx(indices)
         src_masks = outputs["pred_masks"]
-        src_masks = src_masks[src_idx].sigmoid()  # need to sigmoid, (N, T, H, W)
+        src_masks = src_masks[src_idx]
         # Modified to handle video
         target_boxmasks = torch.cat(
             [t['box_masks'][i] for t, (_, i) in zip(targets, indices)]
@@ -315,8 +325,6 @@ class VideoSetCriterionProjPair(nn.Module):
         target_similarities = torch.cat(
             [t['color_similarities'][i] for t, (_, i) in zip(targets, indices)]
         )  # (N, T, k*k-1, H, W)
-
-        T = src_masks.shape[1]
 
         if src_idx[0].shape[0] > 0:
             with torch.no_grad():
@@ -328,7 +336,7 @@ class VideoSetCriterionProjPair(nn.Module):
             warmup_factor = min(self._iter.item() / float(self.pairwise_warmup_iters), 1.0)
             losses = {
                 "loss_mask_pairwise":
-                    (pairwise_loss_jit(src_similarities, target_similarities, num_masks) / T) * warmup_factor
+                    pairwise_loss_jit(src_similarities, target_similarities, num_masks) * warmup_factor
             }
         else:
             losses = {"loss_mask_pairwise": torch.tensor([0], dtype=torch.float32, device=src_masks.device)}
