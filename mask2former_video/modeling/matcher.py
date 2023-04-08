@@ -319,16 +319,17 @@ class VideoHungarianMatcherProjPair(nn.Module):
                 with autocast(enabled=False):
                     ##### projection #####
                     # original projection
-                    cost_projection = batch_axis_projection(out_mask, tgt_boxmask, 3) +  \
-                                      batch_axis_projection(out_mask, tgt_boxmask, 2)
-                    # # projection limited label
-                    # cost_projection = \
-                    #     batch_axis_projection_limited_label(
-                    #         out_mask, tgt_boxmask, tgt_left_bounds, tgt_right_bounds, axis=-1
-                    #     ) + \
-                    #     batch_axis_projection_limited_label(
-                    #         out_mask, tgt_boxmask, tgt_top_bounds, tgt_bottom_bounds, axis=-2
-                    #     )
+                    # cost_projection = batch_axis_projection(out_mask, tgt_boxmask, 3) +  \
+                    #                   batch_axis_projection(out_mask, tgt_boxmask, 2)
+
+                    # projection limited label
+                    cost_projection = \
+                        batch_axis_projection_limited_label(
+                            out_mask, tgt_boxmask, tgt_left_bounds, tgt_right_bounds, axis=-1
+                        ) + \
+                        batch_axis_projection_limited_label(
+                            out_mask, tgt_boxmask, tgt_top_bounds, tgt_bottom_bounds, axis=-2
+                        )
 
                     ##### color similarity #####
                     warmup_factor = min(self._iter.item() / float(self.pairwise_warmup_iters), 1.0)
