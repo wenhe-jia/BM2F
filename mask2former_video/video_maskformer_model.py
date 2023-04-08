@@ -390,7 +390,6 @@ class VideoMaskFormer(nn.Module):
             # rectangle gt mask from boxes for mask projection loss
             # TODO: add images_color_similarity for pairwise loss
             gt_ids_per_video = []
-            # color_similarity_per_video = []  # [(1, k*k-1, H/4, W/4)] * T
             for f_i, targets_per_frame in enumerate(targets_per_video["instances"]):
                 targets_per_frame = targets_per_frame.to(self.device)
                 gt_ids_per_video.append(targets_per_frame.gt_ids[:, None])  # [(num_ins, 1), (num_ins, 1)]
@@ -404,7 +403,6 @@ class VideoMaskFormer(nn.Module):
                     frame_lab, downsampled_image_masks[vid_ind, f_i],
                     self.pairwise_size, self.pairwise_dilation
                 )  # (1, k*k-1, H/4, W/4)
-                # color_similarity_per_video.append(frame_color_similarity)
 
                 # generate rectangle gt masks from boxes of shape (N, 4) in abs coordinates
                 if len(targets_per_frame) > 0:
@@ -433,15 +431,6 @@ class VideoMaskFormer(nn.Module):
             right_bounds_per_video = right_bounds_full_per_video[:, :, start::stride] / stride
             top_bounds_per_video = top_bounds_full_per_video[:, :, start::stride] / stride
             bottom_bounds_per_video = bottom_bounds_full_per_video[:, :, start::stride] / stride
-
-            assert gt_boxmasks_per_video.shape[2] * stride == h_pad
-            assert gt_boxmasks_per_video.shape[3] * stride == w_pad
-            assert left_bounds_per_video.shape[2] * stride == h_pad
-            assert right_bounds_per_video.shape[2] * stride == h_pad
-            assert top_bounds_per_video.shape[2] * stride == w_pad
-            assert bottom_bounds_per_video.shape[2] * stride == w_pad
-            assert color_similarity_per_video.shape[3] * stride == h_pad
-            assert color_similarity_per_video.shape[4] * stride == w_pad
 
             gt_ids_per_video = torch.cat(gt_ids_per_video, dim=1)  # (N, num_frame)
             valid_idx = (gt_ids_per_video != -1).any(dim=-1)  # (num_ins,), 别取到再所有帧上都是空的gt
