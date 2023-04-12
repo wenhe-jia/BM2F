@@ -212,6 +212,7 @@ class VideoMaskFormer(nn.Module):
                 pairwise_color_thresh=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.COLOR_THRESH,
                 pairwise_warmup_iters=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.WARMUP_ITERS,
                 losses=losses,
+                # mask update
                 update_mask=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_UPDATE.ENABLED,
                 mask_update_steps=[
                     int(x * cfg.SOLVER.MAX_ITER)
@@ -220,7 +221,17 @@ class VideoMaskFormer(nn.Module):
                 update_pix_thrs=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_UPDATE.PIX_THRS,
                 quality_type=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_UPDATE.QUALITY_TYPE,
                 static_quality_thr=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_UPDATE.STATIC_QUALITY_THR,
-                max_iter=cfg.SOLVER.MAX_ITER
+                max_iter=cfg.SOLVER.MAX_ITER,
+                # frame or tube update
+                mask_update_type=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_UPDATE.UPDATE_TYPE,
+                intersaction=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_UPDATE.INTERSACTION,
+                # frame update
+                frame_cls_enabled=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_UPDATE.FRAME_UPDATE.CLS_ENABLED,
+                frame_proj_dice_type=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_UPDATE.FRAME_UPDATE.PROJ_DICE_TYPE,
+                frame_quality_type=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_UPDATE.FRAME_UPDATE.QUALITY_TYPE,
+                # tube update
+                tube_cls_enabled=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_UPDATE.TUBE_UPDATE.CLS_ENABLED,
+                tube_quality_type=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.MASK_UPDATE.TUBE_UPDATE.QUALITY_TYPE,
             )
         else:
             raise Exception("Unknown supervision type !!!")

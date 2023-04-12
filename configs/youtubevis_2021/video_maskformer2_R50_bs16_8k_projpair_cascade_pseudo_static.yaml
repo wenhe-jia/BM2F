@@ -12,7 +12,7 @@ MODEL:
         COLOR_THRESH: 0.3
         WARMUP_ITERS: 2000
       MASK_UPDATE:
-        ENABLED: False
+        ENABLED: True
         STEPS: [0.0, 1.0]
         PIX_THRS: [0.5]
         QUALITY_TYPE: "static"

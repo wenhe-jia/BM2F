@@ -2,20 +2,20 @@ _BASE_: video_maskformer2_R50_bs16_8ep.yaml
 MODEL:
   WEIGHTS: "weights/model_final_3c8ec9.pkl"
   MASK_FORMER:
-    SUP_TYPE: "mask_projection"
+    SUP_TYPE: "mask_projection_and_pairwise"
     WEAK_SUPERVISION:
       PROJECTION_WEIGHT: 5.0
-      MASK_UPDATE:
-        ENABLED: True
-        STEPS: [0.0, 1.0]
-        PIX_THRS: [0.5]
-        CONF_TYPE: "dynamic"
-        STATIC_CONF_THR: 0.8
+      PAIRWISE_WEIGHT: 2.0
+      PAIRWISE:
+        SIZE: 3
+        DILATION: 2
+        COLOR_THRESH: 0.3
+        WARMUP_ITERS: 2000
 SOLVER:
   IMS_PER_BATCH: 8
   BASE_LR: 0.00005  # 0.0001
-  STEPS: (11000,)
-  MAX_ITER: 16000
+  STEPS: (22000, 28000)  # (11000,)
+  MAX_ITER: 32000  # 16000
   CHECKPOINT_PERIOD: 4000
 TEST:
   EVAL_PERIOD: 8000
