@@ -126,18 +126,21 @@ class VideoMaskFormer(nn.Module):
             weight_dict = {
                 "loss_ce": cfg.MODEL.MASK_FORMER.CLASS_WEIGHT,
                 "loss_mask": cfg.MODEL.MASK_FORMER.MASK_WEIGHT,
-                "loss_dice": cfg.MODEL.MASK_FORMER.DICE_WEIGHT
+                "loss_dice": cfg.MODEL.MASK_FORMER.DICE_WEIGHT,
             }
         elif supervision_type == "mask_projection":
             weight_dict = {
                 "loss_ce": cfg.MODEL.MASK_FORMER.CLASS_WEIGHT,
-                "loss_mask_projection": cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PROJECTION_WEIGHT
+                "loss_mask_projection": cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PROJECTION_WEIGHT,
             }
         elif supervision_type == "mask_projection_and_pairwise":
             weight_dict = {
                 "loss_ce": cfg.MODEL.MASK_FORMER.CLASS_WEIGHT,
                 "loss_mask_projection": cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PROJECTION_WEIGHT,
-                "loss_mask_pairwise": cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE_WEIGHT
+                "loss_mask_pairwise": cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE_WEIGHT,
+                "loss_gt_mask_dice": 1.0,  #
+                "updt_ins_num": 1.0,  #
+                "updt_time": 1.0,  #
             }
         else:
             raise Exception("Unknown mask_target_type type !!!")
@@ -201,7 +204,8 @@ class VideoMaskFormer(nn.Module):
                 pairwise_color_thresh=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.COLOR_THRESH,
                 pairwise_warmup_iters=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.WARMUP_ITERS,
             )
-            losses = ["labels", "projection_masks", "pairwise"]
+            losses = ["labels", "projection_masks", "pairwise", "gt_mask_dice"]
+            # losses = ["labels", "projection_masks", "pairwise"]
             criterion = VideoSetCriterionProjPair(
                 sem_seg_head.num_classes,
                 matcher=matcher,
@@ -326,6 +330,9 @@ class VideoMaskFormer(nn.Module):
                     losses.pop(k)
             return losses
         else:
+            # mask_cls_results = outputs['aux_outputs'][0]["pred_logits"]
+            # mask_pred_results = outputs['aux_outputs'][0]["pred_masks"]
+
             mask_cls_results = outputs["pred_logits"]
             mask_pred_results = outputs["pred_masks"]
 
@@ -385,6 +392,9 @@ class VideoMaskFormer(nn.Module):
             _num_instance = len(targets_per_video["instances"][0])
 
             mask_shape = [_num_instance, T, h_pad, w_pad]
+            # gt mask
+            gt_masks_full_per_video = torch.zeros(mask_shape, dtype=torch.bool, device=self.device)
+            # box mask
             gt_boxmasks_full_per_video = torch.zeros(mask_shape, dtype=torch.float32, device=self.device)
 
             x_bound_shape = [_num_instance, T, h_pad]
@@ -405,6 +415,15 @@ class VideoMaskFormer(nn.Module):
                 targets_per_frame = targets_per_frame.to(self.device)
                 gt_ids_per_video.append(targets_per_frame.gt_ids[:, None])  # [(num_ins, 1), (num_ins, 1)]
 
+                ####################
+                ##### full spvs ####
+                ####################
+                h, w = targets_per_frame.image_size
+                gt_masks_full_per_video[:, f_i, :h, :w] = targets_per_frame.gt_masks.tensor
+
+                ####################
+                ##### weak spvs ####
+                ####################
                 # color similarity
                 # (H/4, W/4, 3)
                 frame_lab = color.rgb2lab(downsampled_images[vid_ind, f_i].byte().permute(1, 2, 0).cpu().numpy())
@@ -437,6 +456,7 @@ class VideoMaskFormer(nn.Module):
                         color_similarity_per_video[ins_i, f_i] = frame_color_similarity
 
             # (G, T, h_pad/4, w_pad/4)
+            gt_masks_per_video = gt_masks_full_per_video[:, :, start::stride, start::stride]
             gt_boxmasks_per_video = gt_boxmasks_full_per_video[:, :, start::stride, start::stride]
             left_bounds_per_video = left_bounds_full_per_video[:, :, start::stride] / stride
             right_bounds_per_video = right_bounds_full_per_video[:, :, start::stride] / stride
@@ -452,12 +472,14 @@ class VideoMaskFormer(nn.Module):
             gt_instances.append(
                 {
                     "labels": gt_classes_per_video, "ids": gt_ids_per_video,
+                    "masks": gt_masks_per_video[valid_idx].float(),
                     "box_masks": gt_boxmasks_per_video[valid_idx].float(),
                     "left_bounds": left_bounds_per_video[valid_idx].float(),
                     "right_bounds": right_bounds_per_video[valid_idx].float(),
                     "top_bounds": top_bounds_per_video[valid_idx].float(),
                     "bottom_bounds": bottom_bounds_per_video[valid_idx].float(),
                     "color_similarities": color_similarity_per_video[valid_idx].float(),
+                    "vid_name": targets_per_video['file_names'][0].split('/')[-2] + '/'
                 }
             )
         return gt_instances
