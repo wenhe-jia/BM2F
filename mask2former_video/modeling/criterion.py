@@ -217,7 +217,7 @@ def calculate_pred_similaries_video(pred_mask, kernel_size, dilation):
 
     # the probability of making the same prediction = p_i * p_j + (1 - p_i) * (1 - p_j)
     # we compute the the probability in log space to avoid numerical instability
-    # (Q, T, H, W) -> (Q, T, 1, H, W), (Q, T, 1, H, W) + (Q, T, k*k-1, H, W) ->(Q, T, k*k-1, H, W)
+    # (N, T, H, W) -> (N, T, 1, H, W), (N, T, 1, H, W) + (N, T, k*k-1, H, W) -> (N, T, k*k-1, H, W)
     log_same_fg_prob = log_fg_prob[:, :, None] + log_fg_prob_unfold  # (N, T, k*k-1, H/4, W/4)
     log_same_bg_prob = log_bg_prob[:, :, None] + log_bg_prob_unfold  # (N, T, k*k-1, H/4, W/4)
 
@@ -284,26 +284,6 @@ class VideoSetCriterionProjPair(nn.Module):
         self.pairwise_color_thresh = pairwise_color_thresh
         self.pairwise_warmup_iters = pairwise_warmup_iters
         self.losses = losses
-
-        self.update_masks = update_mask
-        self.mask_update_steps = mask_update_steps
-        self.update_pix_thrs = update_pix_thrs
-        assert len(self.mask_update_steps) == len(self.update_pix_thrs) + 1
-
-        self.quality_type = quality_type
-        self.static_quality_thr = static_quality_thr
-        self.max_iter = max_iter
-
-        self.mask_update_type = mask_update_type
-        self.intersaction = intersaction
-        # frame update
-        self.frame_cls_enabled = frame_cls_enabled
-        self.frame_proj_dice_type = frame_proj_dice_type
-        self.frame_quality_type = frame_quality_type
-        # tube update
-        self.tube_cls_enabled = tube_cls_enabled
-        self.tube_quality_type = tube_quality_type
-
         empty_weight = torch.ones(self.num_classes + 1)
         empty_weight[-1] = self.eos_coef
         self.register_buffer("empty_weight", empty_weight)
@@ -341,14 +321,9 @@ class VideoSetCriterionProjPair(nn.Module):
         src_masks = src_masks[src_idx]
 
         # Modified to handle video
-        if "new_mask_targets" in targets[0]:
-            target_boxmasks = torch.cat(
-                [t["new_mask_targets"]['box_masks'][i] for t, (_, i) in zip(targets, indices)]
-            ).to(src_masks)  # (N, T, H, W)
-        else:
-            target_boxmasks = torch.cat(
-                [t['box_masks'][i] for t, (_, i) in zip(targets, indices)]
-            ).to(src_masks)  # (N, T, H, W)
+        target_boxmasks = torch.cat(
+            [t['box_masks'][i] for t, (_, i) in zip(targets, indices)]
+        ).to(src_masks)  # (N, T, H, W)
 
         target_similarities = torch.cat(
             [t['color_similarities'][i] for t, (_, i) in zip(targets, indices)]
@@ -386,38 +361,21 @@ class VideoSetCriterionProjPair(nn.Module):
         src_masks = src_masks[src_idx].sigmoid()  # need to sigmoid
 
         # Modified to handle video
-        if "new_mask_targets" in targets[0]:
-            target_boxmasks = torch.cat(
-                [t["new_mask_targets"]["box_masks"][i] for t, (_, i) in zip(targets, indices)]
-            ).to(src_masks)
-            target_left_bounds = torch.cat(
-                [t["new_mask_targets"]["left_bounds"][i] for t, (_, i) in zip(targets, indices)]
-            ).to(src_masks)
-            target_right_bounds = torch.cat(
-                [t["new_mask_targets"]["right_bounds"][i] for t, (_, i) in zip(targets, indices)]
-            ).to(src_masks)
-            target_top_bounds = torch.cat(
-                [t["new_mask_targets"]["top_bounds"][i] for t, (_, i) in zip(targets, indices)]
-            ).to(src_masks)
-            target_bottom_bounds = torch.cat(
-                [t["new_mask_targets"]["bottom_bounds"][i] for t, (_, i) in zip(targets, indices)]
-            ).to(src_masks)
-        else:
-            target_boxmasks = torch.cat(
-                [t['box_masks'][i] for t, (_, i) in zip(targets, indices)]
-            ).to(src_masks)
-            target_left_bounds = torch.cat(
-                [t['left_bounds'][i] for t, (_, i) in zip(targets, indices)]
-            ).to(src_masks)
-            target_right_bounds = torch.cat(
-                [t['right_bounds'][i] for t, (_, i) in zip(targets, indices)]
-            ).to(src_masks)
-            target_top_bounds = torch.cat(
-                [t['top_bounds'][i] for t, (_, i) in zip(targets, indices)]
-            ).to(src_masks)
-            target_bottom_bounds = torch.cat(
-                [t['bottom_bounds'][i] for t, (_, i) in zip(targets, indices)]
-            ).to(src_masks)
+        target_boxmasks = torch.cat(
+            [t['box_masks'][i] for t, (_, i) in zip(targets, indices)]
+        ).to(src_masks)
+        target_left_bounds = torch.cat(
+            [t['left_bounds'][i] for t, (_, i) in zip(targets, indices)]
+        ).to(src_masks)
+        target_right_bounds = torch.cat(
+            [t['right_bounds'][i] for t, (_, i) in zip(targets, indices)]
+        ).to(src_masks)
+        target_top_bounds = torch.cat(
+            [t['top_bounds'][i] for t, (_, i) in zip(targets, indices)]
+        ).to(src_masks)
+        target_bottom_bounds = torch.cat(
+            [t['bottom_bounds'][i] for t, (_, i) in zip(targets, indices)]
+        ).to(src_masks)
 
         # (N, T, H_pad/4, W_pad/4) -> (NT, 1, H_pad/4, W_pad/4)
         src_masks = src_masks.flatten(0, 1)[:, None]
@@ -431,39 +389,39 @@ class VideoSetCriterionProjPair(nn.Module):
             """
                 bellow is for original projection loss
             """
-            src_masks_y = src_masks.max(dim=3, keepdim=True)[0].flatten(1)
-            src_masks_x = src_masks.max(dim=2, keepdim=True)[0].flatten(1)
-
-            with torch.no_grad():
-                target_boxmasks_y = target_boxmasks.max(dim=3, keepdim=True)[0].flatten(1)
-                target_boxmasks_x = target_boxmasks.max(dim=2, keepdim=True)[0].flatten(1)
+            # src_masks_y = src_masks.max(dim=3, keepdim=True)[0].flatten(1)
+            # src_masks_x = src_masks.max(dim=2, keepdim=True)[0].flatten(1)
+            #
+            # with torch.no_grad():
+            #     target_boxmasks_y = target_boxmasks.max(dim=3, keepdim=True)[0].flatten(1)
+            #     target_boxmasks_x = target_boxmasks.max(dim=2, keepdim=True)[0].flatten(1)
 
             """
                 bellow is for projection limited label loss
             """
-            # NT = src_masks.shape[0]
-            # H = src_masks.shape[2]
-            # W = src_masks.shape[3]
-            #
-            # src_masks_y, max_inds_x = src_masks.max(dim=3, keepdim=True)  # (NT, 1, H, 1), (NT, 1, H, 1)
-            # src_masks_x, max_inds_y = src_masks.max(dim=2, keepdim=True)  # (NT, 1, 1, W), (NT, 1, 1, W)
-            #
-            # src_masks_y = src_masks_y.flatten(1)  # (NT, H)
-            # src_masks_x = src_masks_x.flatten(1)  # (NT, W)
-            # max_inds_x = max_inds_x.flatten()  # (NTW)
-            # max_inds_y = max_inds_y.flatten()  # (NTH)
-            #
-            # with torch.no_grad():
-            #     flag_l = max_inds_x >= target_left_bounds
-            #     flag_r = max_inds_x < target_right_bounds
-            #     flag_y = (flag_l * flag_r).view(NT, H)
-            #
-            #     flag_t = max_inds_y >= target_top_bounds
-            #     flag_b = max_inds_y < target_bottom_bounds
-            #     flag_x = (flag_t * flag_b).view(NT, W)
-            #
-            #     target_boxmasks_y = target_boxmasks.max(dim=3, keepdim=True)[0].flatten(1) * flag_y  # (NT, W)
-            #     target_boxmasks_x = target_boxmasks.max(dim=2, keepdim=True)[0].flatten(1) * flag_x  # (NT, H)
+            NT = src_masks.shape[0]
+            H = src_masks.shape[2]
+            W = src_masks.shape[3]
+
+            src_masks_y, max_inds_x = src_masks.max(dim=3, keepdim=True)  # (NT, 1, H, 1), (NT, 1, H, 1)
+            src_masks_x, max_inds_y = src_masks.max(dim=2, keepdim=True)  # (NT, 1, 1, W), (NT, 1, 1, W)
+
+            src_masks_y = src_masks_y.flatten(1)  # (NT, H)
+            src_masks_x = src_masks_x.flatten(1)  # (NT, W)
+            max_inds_x = max_inds_x.flatten()  # (NTW)
+            max_inds_y = max_inds_y.flatten()  # (NTH)
+
+            with torch.no_grad():
+                flag_l = max_inds_x >= target_left_bounds
+                flag_r = max_inds_x < target_right_bounds
+                flag_y = (flag_l * flag_r).view(NT, H)
+
+                flag_t = max_inds_y >= target_top_bounds
+                flag_b = max_inds_y < target_bottom_bounds
+                flag_x = (flag_t * flag_b).view(NT, W)
+
+                target_boxmasks_y = target_boxmasks.max(dim=3, keepdim=True)[0].flatten(1) * flag_y  # (NT, W)
+                target_boxmasks_x = target_boxmasks.max(dim=2, keepdim=True)[0].flatten(1) * flag_x  # (NT, H)
 
             losses = {
                 "loss_mask_projection": projection2D_dice_loss_jit(
@@ -506,194 +464,6 @@ class VideoSetCriterionProjPair(nn.Module):
         assert loss in loss_map, f"do you really want to compute {loss} loss?"
         return loss_map[loss](outputs, targets, indices, num_masks)
 
-    @torch.no_grad()
-    def update_targets(
-            self,
-            src_per_batch,
-            targets_per_batch,
-            indices_per_batch,
-            quality_thr=0.5,
-    ):
-        """
-        indices_curr_lvl: [(tensor(G,), tensor(G,))] x num_img
-        """
-        src_scores_per_batch = F.softmax(src_per_batch["pred_logits"], dim=-1)  # (B, Q, C)
-        src_mask_probs_per_batch = src_per_batch["pred_masks"].sigmoid()  # (B, Q, T, H, W)
-        B = src_mask_probs_per_batch.shape[0]
-        T = src_mask_probs_per_batch.shape[2]
-        src_scores_per_batch = src_scores_per_batch.split(B, 0)[0]  # [(Q, C)] x B
-        src_mask_probs_per_batch = src_mask_probs_per_batch.split(B, 0)[0]  # [(Q, T, H, W)] x B
-
-        new_targets = []
-        for indice, src_scores, src_mask_probs, targets in zip(
-            indices_per_batch, src_scores_per_batch, src_mask_probs_per_batch, targets_per_batch
-        ):
-            gt_classes = targets["labels"]  # (G,)
-            box_masks = targets["box_masks"]  # (G, T, H, W)
-            left_bounds = targets["left_bounds"]  # (G, T, H)
-            right_bounds = targets["right_bounds"]  # (G, T, H)
-            top_bounds = targets["top_bounds"]  # (G, T, W)
-            bottom_bounds = targets["bottom_bounds"]  # (G, T, W)
-
-            new_box_masks = torch.zeros_like(box_masks)
-            new_left_bounds = torch.zeros_like(left_bounds)
-            new_right_bounds = torch.zeros_like(right_bounds)
-            new_top_bnounds = torch.zeros_like(top_bounds)
-            new_bottom_bounds = torch.zeros_like(bottom_bounds)
-            quality_scores = -torch.ones_like(gt_classes).float()
-
-            for src_idx, tgt_idx in zip(indice[0], indice[1]):
-                cls_score = src_scores[src_idx, gt_classes[tgt_idx]]
-
-                if self.mask_update_type == "frame":
-
-                    """
-                        TODO: problem with quality score
-                    """
-
-                    for f_i in range(T):
-                        ############################# pix_score #############################
-                        # mask_probs = src_mask_probs[src_idx, f_i]
-                        # mask_probs = mask_probs * box_masks[tgt_idx, f_i]  # 框内算pix_score
-                        # pix_score = (mask_probs * (mask_probs > 0.5).float()).sum() / \
-                        #             ((mask_probs > 0.5).float().sum() + 1e-6)
-                        #####################################################################
-
-                        # (H, W) -> (H*W)
-                        src_mask = (src_mask_probs[src_idx, f_i] > 0.5).float()
-                        tgt_mask = box_masks[tgt_idx, f_i].float()
-
-                        def get_proj_dice_score(src, tgt):
-                            # calculate frame projection dice score
-                            proj_dice_score = (2 * torch.dot(src, tgt)) / ((src ** 2.0).sum() + (tgt ** 2.0).sum() + 1e-5)
-                            return proj_dice_score
-
-                        dice_score_x = get_proj_dice_score(
-                            src_mask.max(dim=0, keepdim=True)[0].flatten(),
-                            tgt_mask.max(dim=0, keepdim=True)[0].flatten()
-                        )
-                        dice_score_y = get_proj_dice_score(
-                            src_mask.max(dim=1, keepdim=True)[0].flatten(),
-                            tgt_mask.max(dim=1, keepdim=True)[0].flatten()
-                        )
-                        # get dice score from x and y projection
-                        if self.frame_proj_dice_type == "sum":
-                            dice_score = dice_score_x + dice_score_y
-                        elif self.frame_proj_dice_type == "mean":
-                            dice_score = (dice_score_x + dice_score_y) / 2
-                        elif self.frame_proj_dice_type == "mul":
-                            dice_score = dice_score_x * dice_score_y
-                        elif self.frame_proj_dice_type == "mul_and_pow":
-                            dice_score = torch.pow(dice_score_x * dice_score_y, 0.5)
-                        else:
-                            raise Exception("==========\nUnsupported type !\n==========")
-
-                        # get quality score
-                        if self.frame_cls_enabled:
-                            if self.frame_quality_type == "mul":
-                                quality_score = cls_score * dice_score
-                            elif self.frame_quality_type == "mul_and_pow":
-                                quality_score = torch.pow(cls_score * dice_score, 0.5)
-                            else:
-                                raise Exception("==========\nUnsupported type !\n==========")
-                        else:
-                            quality_score = dice_score
-
-                        if quality_score >= quality_thr:
-                            if self.intersaction:
-                                new_box_masks[tgt_idx, f_i] = src_mask.int() * box_masks[tgt_idx, f_i]
-                            else:
-                                new_box_masks[tgt_idx, f_i] = src_mask.int()
-
-                            # bounds for y projection
-                            new_left_bounds[tgt_idx, f_i] = torch.argmax(new_box_masks[tgt_idx, f_i], dim=1)
-                            new_right_bounds[tgt_idx, f_i] = new_box_masks[tgt_idx, f_i].shape[1] - \
-                                                        torch.argmax(new_box_masks[tgt_idx, f_i].flip(1), dim=1)
-                            # bounds for x projection
-                            new_top_bnounds[tgt_idx, f_i] = torch.argmax(new_box_masks[tgt_idx, f_i], dim=0)
-                            new_bottom_bounds[tgt_idx, f_i] = new_box_masks[tgt_idx, f_i].shape[0] - \
-                                                         torch.argmax(new_box_masks[tgt_idx, f_i].flip(0), dim=0)
-                        else:
-                            new_box_masks[tgt_idx, f_i] = box_masks[tgt_idx, f_i]
-                            new_left_bounds[tgt_idx, f_i] = left_bounds[tgt_idx, f_i]
-                            new_right_bounds[tgt_idx, f_i] = right_bounds[tgt_idx, f_i]
-                            new_top_bnounds[tgt_idx, f_i] = top_bounds[tgt_idx, f_i]
-                            new_bottom_bounds[tgt_idx, f_i] = bottom_bounds[tgt_idx, f_i]
-                elif self.mask_update_type == "tube":
-                    mask_probs = src_mask_probs[src_idx]
-
-                    dice_scores = []
-                    for f_i in range(T):
-                        src_mask = (mask_probs[f_i] > 0.5).float()
-                        tgt_mask = box_masks[tgt_idx, f_i].float()
-
-                        def get_proj_dice_score(src, tgt):
-                            # calculate frame projection dice score
-                            proj_dice_score = (2 * torch.dot(src, tgt)) / ((src ** 2.0).sum() + (tgt ** 2.0).sum() + 1e-5)
-                            return proj_dice_score
-
-                        frame_dice_score_x = get_proj_dice_score(
-                            src_mask.max(dim=0, keepdim=True)[0].flatten(),
-                            tgt_mask.max(dim=0, keepdim=True)[0].flatten()
-                        )
-                        frame_dice_score_y = get_proj_dice_score(
-                            src_mask.max(dim=1, keepdim=True)[0].flatten(),
-                            tgt_mask.max(dim=1, keepdim=True)[0].flatten()
-                        )
-                        frame_dice_score = frame_dice_score_x * frame_dice_score_y
-                        dice_scores.append(frame_dice_score)
-
-                    dice_score = torch.stack(dice_scores, dim=0).mean()
-
-                    if self.tube_cls_enabled:
-                        if self.tube_quality_type == "mul":
-                            curr_quality_score = dice_score * cls_score
-                        elif self.tube_quality_type == "mul_and_pow":
-                            curr_quality_score = torch.pow(dice_score * cls_score, 0.5)
-                        else:
-                            raise Exception("==========\nUnsupported type !\n==========")
-                    else:
-                        curr_quality_score = dice_score
-
-                    # if curr_quality_score >= quality_thr and curr_quality_score > quality_scores[src_idx]:
-                    if curr_quality_score >= quality_thr:
-
-                        if self.intersaction:
-                            new_box_masks[tgt_idx] = (mask_probs > 0.5) * box_masks[tgt_idx]
-                        else:
-                            new_box_masks[tgt_idx] = (mask_probs > 0.5).int()
-
-                        for f_i in range(T):
-                            # bounds for y projection
-                            new_left_bounds[tgt_idx, f_i] = torch.argmax(new_box_masks[tgt_idx, f_i], dim=1)
-                            new_right_bounds[tgt_idx, f_i] = new_box_masks[tgt_idx, f_i].shape[1] - \
-                                                             torch.argmax(new_box_masks[tgt_idx, f_i].flip(1), dim=1)
-                            # bounds for x projection
-                            new_top_bnounds[tgt_idx, f_i] = torch.argmax(new_box_masks[tgt_idx, f_i], dim=0)
-                            new_bottom_bounds[tgt_idx, f_i] = new_box_masks[tgt_idx, f_i].shape[0] - \
-                                                              torch.argmax(new_box_masks[tgt_idx, f_i].flip(0), dim=0)
-
-                        quality_scores[tgt_idx] = curr_quality_score
-                    else:
-                        new_box_masks[tgt_idx] = box_masks[tgt_idx]
-                        new_left_bounds[tgt_idx] = left_bounds[tgt_idx]
-                        new_right_bounds[tgt_idx] = right_bounds[tgt_idx]
-                        new_top_bnounds[tgt_idx] = top_bounds[tgt_idx]
-                        new_bottom_bounds[tgt_idx] = bottom_bounds[tgt_idx]
-                else:
-                    raise Exception("==========\nUnsupported update type !\n==========")
-
-            targets["new_mask_targets"] = {}
-            targets["new_mask_targets"]["box_masks"] = new_box_masks
-            targets["new_mask_targets"]["left_bounds"] = new_left_bounds
-            targets["new_mask_targets"]["right_bounds"] = new_right_bounds
-            targets["new_mask_targets"]["top_bounds"] = new_top_bnounds
-            targets["new_mask_targets"]["bottom_bounds"] = new_bottom_bounds
-            targets["new_mask_targets"]["quality_scores"] = quality_scores
-            new_targets.append(targets)
-
-        return new_targets
-
     def forward(self, outputs, targets):
         """This performs the loss computation.
         Parameters:
@@ -701,78 +471,33 @@ class VideoSetCriterionProjPair(nn.Module):
              targets: list of dicts, such that len(targets) == batch_size.
                       The expected keys in each dict depends on the losses applied, see each loss' doc
         """
-        if self.update_masks:
-            # Compute the average number of target boxes accross all nodes, for normalization purposes
-            num_masks = sum(len(t["labels"]) for t in targets)
-            num_masks = torch.as_tensor(
-                [num_masks], dtype=torch.float, device=next(iter(outputs.values())).device
-            )
-            if is_dist_avail_and_initialized():
-                torch.distributed.all_reduce(num_masks)
-            num_masks = torch.clamp(num_masks / get_world_size(), min=1).item()
+        outputs_without_aux = {k: v for k, v in outputs.items() if k != "aux_outputs"}
 
-            # Compute all the requested losses
-            losses = {}
+        # Retrieve the matching between the outputs of the last layer and the targets
+        indices = self.matcher(outputs_without_aux, targets)
 
-            # calculate mask update pix thr
-            # thr_ind = 0
-            # for ind in range(len(self.mask_update_steps) - 1):
-            #     if self._iter >= self.mask_update_steps[ind] and self._iter < self.mask_update_steps[ind + 1]:
-            #         thr_ind = ind
-            # pix_thr = self.update_pix_thrs[thr_ind]
+        # Compute the average number of target boxes accross all nodes, for normalization purposes
+        num_masks = sum(len(t["labels"]) for t in targets)
+        num_masks = torch.as_tensor(
+            [num_masks], dtype=torch.float, device=next(iter(outputs.values())).device
+        )
+        if is_dist_avail_and_initialized():
+            torch.distributed.all_reduce(num_masks)
+        num_masks = torch.clamp(num_masks / get_world_size(), min=1).item()
 
-            # compute loss of auxiliary decoder layer
-            # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
-            if "aux_outputs" in outputs:
-                for i, aux_outputs in enumerate(outputs["aux_outputs"]):
-                    indices = self.matcher(aux_outputs, targets)
-                    for loss in self.losses:
-                        l_dict = self.get_loss(loss, aux_outputs, targets, indices, num_masks)
-                        l_dict = {k + f"_{i}": v for k, v in l_dict.items()}
-                        losses.update(l_dict)
-                    # update targets after curr lvl loss calculation
-                    if self.quality_type == "static":
-                        quality_thr = self.static_quality_thr
-                    elif self.quality_type == "dynamic":
-                        quality_thr = 1 / (1 + torch.exp(-2 * (1 - self._iter / self.max_iter)))
-                    else:
-                        raise Exception("Unknown update type !!!")
-                    targets = self.update_targets(aux_outputs, targets, indices, quality_thr=quality_thr)
+        # Compute all the requested losses
+        losses = {}
+        for loss in self.losses:
+            losses.update(self.get_loss(loss, outputs, targets, indices, num_masks))
 
-            # compute los of final decoder layer
-            outputs_without_aux = {k: v for k, v in outputs.items() if k != "aux_outputs"}
-            # Retrieve the matching between the outputs of the last layer and the targets
-            indices = self.matcher(outputs_without_aux, targets)
-            for loss in self.losses:
-                losses.update(self.get_loss(loss, outputs, targets, indices, num_masks))
-        else:
-            outputs_without_aux = {k: v for k, v in outputs.items() if k != "aux_outputs"}
-
-            # Retrieve the matching between the outputs of the last layer and the targets
-            indices = self.matcher(outputs_without_aux, targets)
-
-            # Compute the average number of target boxes accross all nodes, for normalization purposes
-            num_masks = sum(len(t["labels"]) for t in targets)
-            num_masks = torch.as_tensor(
-                [num_masks], dtype=torch.float, device=next(iter(outputs.values())).device
-            )
-            if is_dist_avail_and_initialized():
-                torch.distributed.all_reduce(num_masks)
-            num_masks = torch.clamp(num_masks / get_world_size(), min=1).item()
-
-            # Compute all the requested losses
-            losses = {}
-            for loss in self.losses:
-                losses.update(self.get_loss(loss, outputs, targets, indices, num_masks))
-
-            # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
-            if "aux_outputs" in outputs:
-                for i, aux_outputs in enumerate(outputs["aux_outputs"]):
-                    indices = self.matcher(aux_outputs, targets)
-                    for loss in self.losses:
-                        l_dict = self.get_loss(loss, aux_outputs, targets, indices, num_masks)
-                        l_dict = {k + f"_{i}": v for k, v in l_dict.items()}
-                        losses.update(l_dict)
+        # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
+        if "aux_outputs" in outputs:
+            for i, aux_outputs in enumerate(outputs["aux_outputs"]):
+                indices = self.matcher(aux_outputs, targets)
+                for loss in self.losses:
+                    l_dict = self.get_loss(loss, aux_outputs, targets, indices, num_masks)
+                    l_dict = {k + f"_{i}": v for k, v in l_dict.items()}
+                    losses.update(l_dict)
         self._iter += 1
         return losses
 
@@ -804,13 +529,6 @@ class VideoSetCriterionProj(nn.Module):
             weight_dict,
             eos_coef,
             losses,
-            # below for mask update
-            update_mask,
-            mask_update_steps,
-            update_pix_thrs,
-            quality_type,
-            static_quality_thr,
-            max_iter
     ):
         """Create the criterion.
         Parameters:
@@ -826,15 +544,6 @@ class VideoSetCriterionProj(nn.Module):
         self.weight_dict = weight_dict
         self.eos_coef = eos_coef
         self.losses = losses
-
-        self.update_masks = update_mask
-        self.mask_update_steps = mask_update_steps
-        self.update_pix_thrs = update_pix_thrs
-        assert len(self.mask_update_steps) == len(self.update_pix_thrs) + 1
-        self.quality_type = quality_type
-        self.static_quality_thr = static_quality_thr
-        self.max_iter = max_iter
-
         empty_weight = torch.ones(self.num_classes + 1)
         empty_weight[-1] = self.eos_coef
         self.register_buffer("empty_weight", empty_weight)
@@ -974,76 +683,6 @@ class VideoSetCriterionProj(nn.Module):
         assert loss in loss_map, f"do you really want to compute {loss} loss?"
         return loss_map[loss](outputs, targets, indices, num_masks)
 
-    @torch.no_grad()
-    def update_targets(
-            self,
-            src_per_batch,
-            targets_per_batch,
-            indices_per_batch,
-            quality_thr=0.5,
-    ):
-        """
-        indices_curr_lvl: [(tensor(G,), tensor(G,))] x num_img
-        """
-        src_scores_per_batch = F.softmax(src_per_batch["pred_logits"], dim=-1)  # (B, Q, C+1), C+1 i for dummy gt
-        src_mask_probs_per_batch = src_per_batch["pred_masks"].sigmoid()  # (B, Q, T, H, W)
-        B = src_mask_probs_per_batch.shape[0]
-        T = src_mask_probs_per_batch.shape[2]
-        src_scores_per_batch = src_scores_per_batch.split(B, 0)[0]  # [(Q, C)] x B
-        src_mask_probs_per_batch = src_mask_probs_per_batch.split(B, 0)[0]  # [(Q, T, H, W)] x B
-
-        new_targets = []
-        for indice, src_scores, src_mask_probs, targets in zip(
-            indices_per_batch, src_scores_per_batch, src_mask_probs_per_batch, targets_per_batch
-        ):
-            gt_classes = targets["labels"]  # (G,)
-            box_masks = targets["box_masks"]  # (G, T, H, W)
-            left_bounds = targets["left_bounds"]  # (G, T, H)
-            right_bounds = targets["right_bounds"]  # (G, T, H)
-            top_bounds = targets["top_bounds"]  # (G, T, W)
-            bottom_bounds = targets["bottom_bounds"]  # (G, T, W)
-
-            new_box_masks = torch.zeros_like(box_masks)
-            new_left_bounds = torch.zeros_like(left_bounds)
-            new_right_bounds = torch.zeros_like(right_bounds)
-            new_top_bnounds = torch.zeros_like(top_bounds)
-            new_bottom_bounds = torch.zeros_like(bottom_bounds)
-
-            for src_idx, tgt_idx in zip(indice[0], indice[1]):
-                cls_score = src_scores[src_idx, gt_classes[tgt_idx]]
-
-                for f_i in range(T):
-                    mask_probs = src_mask_probs[src_idx, f_i]
-                    # mask_probs = mask_probs * box_masks[tgt_idx, f_i]  # 框内算pix_score
-                    pix_score = (mask_probs * (mask_probs > 0.5).float()).sum() / \
-                                ((mask_probs > 0.5).float().sum() + 1e-6)
-
-                    if torch.pow(cls_score * pix_score, 0.5) >= quality_thr:
-                        new_box_masks[tgt_idx, f_i] = (mask_probs > 0.5) * box_masks[tgt_idx, f_i]
-                        # bounds for y projection
-                        new_left_bounds[tgt_idx, f_i] = torch.argmax(new_box_masks[tgt_idx, f_i], dim=1)
-                        new_right_bounds[tgt_idx, f_i] = new_box_masks[tgt_idx, f_i].shape[1] - \
-                                                    torch.argmax(new_box_masks[tgt_idx, f_i].flip(1), dim=1)
-                        # bounds for x projection
-                        new_top_bnounds[tgt_idx, f_i] = torch.argmax(new_box_masks[tgt_idx, f_i], dim=0)
-                        new_bottom_bounds[tgt_idx, f_i] = new_box_masks[tgt_idx, f_i].shape[0] - \
-                                                     torch.argmax(new_box_masks[tgt_idx, f_i].flip(0), dim=0)
-                    else:
-                        new_box_masks[tgt_idx, f_i] = box_masks[tgt_idx, f_i]
-                        new_left_bounds[tgt_idx, f_i] = left_bounds[tgt_idx, f_i]
-                        new_right_bounds[tgt_idx, f_i] = right_bounds[tgt_idx, f_i]
-                        new_top_bnounds[tgt_idx, f_i] = top_bounds[tgt_idx, f_i]
-                        new_bottom_bounds[tgt_idx, f_i] = bottom_bounds[tgt_idx, f_i]
-
-            targets["box_masks"] = new_box_masks
-            targets["left_bounds"] = new_left_bounds
-            targets["right_bounds"] = new_right_bounds
-            targets["top_bounds"] = new_top_bnounds
-            targets["bottom_bounds"] = new_bottom_bounds
-
-            new_targets.append(targets)
-        return new_targets
-
     def forward(self, outputs, targets):
         """This performs the loss computation.
         Parameters:
@@ -1056,78 +695,33 @@ class VideoSetCriterionProj(nn.Module):
             "masks": (num_gt, T, H, W)
             "box_masks": (num_gt, T, H/4, W/4)
         """
-        if self.update_masks:
-            # Compute the average number of target boxes accross all nodes, for normalization purposes
-            num_masks = sum(len(t["labels"]) for t in targets)
-            num_masks = torch.as_tensor(
-                [num_masks], dtype=torch.float, device=next(iter(outputs.values())).device
-            )
-            if is_dist_avail_and_initialized():
-                torch.distributed.all_reduce(num_masks)
-            num_masks = torch.clamp(num_masks / get_world_size(), min=1).item()
+        outputs_without_aux = {k: v for k, v in outputs.items() if k != "aux_outputs"}
 
-            # Compute all the requested losses
-            losses = {}
+        # Retrieve the matching between the outputs of the last layer and the targets
+        indices = self.matcher(outputs_without_aux, targets)
 
-            # calculate mask update pix thr
-            # thr_ind = 0
-            # for ind in range(len(self.mask_update_steps) - 1):
-            #     if self._iter >= self.mask_update_steps[ind] and self._iter < self.mask_update_steps[ind + 1]:
-            #         thr_ind = ind
-            # pix_thr = self.update_pix_thrs[thr_ind]
+        # Compute the average number of target boxes accross all nodes, for normalization purposes
+        num_masks = sum(len(t["labels"]) for t in targets)
+        num_masks = torch.as_tensor(
+            [num_masks], dtype=torch.float, device=next(iter(outputs.values())).device
+        )
+        if is_dist_avail_and_initialized():
+            torch.distributed.all_reduce(num_masks)
+        num_masks = torch.clamp(num_masks / get_world_size(), min=1).item()
 
-            # compute loss of auxiliary decoder layer
-            # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
-            if "aux_outputs" in outputs:
-                for i, aux_outputs in enumerate(outputs["aux_outputs"]):
-                    indices = self.matcher(aux_outputs, targets)
-                    for loss in self.losses:
-                        l_dict = self.get_loss(loss, aux_outputs, targets, indices, num_masks)
-                        l_dict = {k + f"_{i}": v for k, v in l_dict.items()}
-                        losses.update(l_dict)
-                    # update targets after curr lvl loss calculation
-                    if self.quality_type == "static":
-                        quality_thr = self.static_quality_thr
-                    elif self.quality_type == "dynamic":
-                        quality_thr = 1 / (1 + torch.exp(-2 * (1 - self._iter / self.max_iter)))
-                    else:
-                        raise Exception("Unknown update type !!!")
-                    targets = self.update_targets(aux_outputs, targets, indices, quality_thr=quality_thr)
+        # Compute all the requested losses
+        losses = {}
+        for loss in self.losses:
+            losses.update(self.get_loss(loss, outputs, targets, indices, num_masks))
 
-            # compute los of final decoder layer
-            outputs_without_aux = {k: v for k, v in outputs.items() if k != "aux_outputs"}
-            # Retrieve the matching between the outputs of the last layer and the targets
-            indices = self.matcher(outputs_without_aux, targets)
-            for loss in self.losses:
-                losses.update(self.get_loss(loss, outputs, targets, indices, num_masks))
-        else:
-            outputs_without_aux = {k: v for k, v in outputs.items() if k != "aux_outputs"}
-
-            # Retrieve the matching between the outputs of the last layer and the targets
-            indices = self.matcher(outputs_without_aux, targets)
-
-            # Compute the average number of target boxes accross all nodes, for normalization purposes
-            num_masks = sum(len(t["labels"]) for t in targets)
-            num_masks = torch.as_tensor(
-                [num_masks], dtype=torch.float, device=next(iter(outputs.values())).device
-            )
-            if is_dist_avail_and_initialized():
-                torch.distributed.all_reduce(num_masks)
-            num_masks = torch.clamp(num_masks / get_world_size(), min=1).item()
-
-            # Compute all the requested losses
-            losses = {}
-            for loss in self.losses:
-                losses.update(self.get_loss(loss, outputs, targets, indices, num_masks))
-
-            # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
-            if "aux_outputs" in outputs:
-                for i, aux_outputs in enumerate(outputs["aux_outputs"]):
-                    indices = self.matcher(aux_outputs, targets)
-                    for loss in self.losses:
-                        l_dict = self.get_loss(loss, aux_outputs, targets, indices, num_masks)
-                        l_dict = {k + f"_{i}": v for k, v in l_dict.items()}
-                        losses.update(l_dict)
+        # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
+        if "aux_outputs" in outputs:
+            for i, aux_outputs in enumerate(outputs["aux_outputs"]):
+                indices = self.matcher(aux_outputs, targets)
+                for loss in self.losses:
+                    l_dict = self.get_loss(loss, aux_outputs, targets, indices, num_masks)
+                    l_dict = {k + f"_{i}": v for k, v in l_dict.items()}
+                    losses.update(l_dict)
         self._iter += 1
         return losses
 

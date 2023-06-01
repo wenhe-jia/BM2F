@@ -48,6 +48,7 @@ def get_images_color_similarity(images, image_masks, kernel_size, dilation):
     # 一个像素和周边8个像素的在lab空间3通道的减法（差值）
     similarity = torch.exp(-torch.norm(diff, dim=1) * 0.5)  # edge: (1, k*k-1, H/4, W/4)
 
+    # for COCO
     unfolded_weights = unfold_wo_center(
         image_masks[None, None], kernel_size=kernel_size,
         dilation=dilation
