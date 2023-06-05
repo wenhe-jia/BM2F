@@ -9,6 +9,7 @@ from .video_maskformer_model import VideoMaskFormer
 
 # video
 from .data_video import (
+    YTVISDatasetWithFeatsMapper,
     YTVISDatasetMapper,
     YTVISEvaluator,
     build_detection_train_loader,

@@ -14,16 +14,20 @@ from detectron2.modeling.backbone import Backbone
 from detectron2.modeling.postprocessing import sem_seg_postprocess
 from detectron2.structures import Boxes, ImageList, Instances, BitMasks
 
-from .modeling.criterion import VideoSetCriterionProj, VideoSetCriterionProjPair
+from .modeling.criterion_proj import VideoSetCriterionProj
+from .modeling.criterion_proj_spatpair import VideoSetCriterionProjSpatPair
+from .modeling.criterion_proj_spatpair_temppair import VideoSetCriterionProjSpatPairTempPair
 from .modeling.matcher import VideoHungarianMatcherProj, VideoHungarianMatcherProjPair
 from .utils.memory import retry_if_cuda_oom
 
-from .utils.weaksup_utils import unfold_wo_center, get_images_color_similarity
+from .utils.weaksup_utils import unfold_wo_center, get_images_color_similarity, get_instance_temporal_pairs
 
-import os, cv2
+import os
+import cv2
 import numpy as np
 from skimage import color
 import copy
+import random
 
 
 logger = logging.getLogger(__name__)
@@ -55,7 +59,8 @@ class VideoMaskFormer(nn.Module):
         num_frames,
         output_dir,
         pairwise_size,
-        pairwise_dilation
+        pairwise_dilation,
+        temporal_pairwise,
     ):
         """
         Args:
@@ -100,11 +105,17 @@ class VideoMaskFormer(nn.Module):
         self.num_frames = num_frames
 
         self.weak_supervision = weak_supervision
+        self.temporal_pairwise = temporal_pairwise
+
         self.mask_out_stride = 4
         self.pairwise_size = pairwise_size
         self.pairwise_dilation = pairwise_dilation
 
         self.output_dir = output_dir
+
+        # TEMPORAL USAGE, TODO: MAKE IT CONFIGURABLE
+        self.dino_feat_dim = 1536
+        self.temporal_k = 1
 
     @classmethod
     def from_config(cls, cfg):
@@ -115,6 +126,7 @@ class VideoMaskFormer(nn.Module):
         deep_supervision = cfg.MODEL.MASK_FORMER.DEEP_SUPERVISION
         no_object_weight = cfg.MODEL.MASK_FORMER.NO_OBJECT_WEIGHT
         weak_supervision = False
+        temporal_pairwise = False
 
         # define supervision type
         supervision_type = cfg.MODEL.MASK_FORMER.SUP_TYPE
@@ -133,12 +145,21 @@ class VideoMaskFormer(nn.Module):
                 "loss_ce": cfg.MODEL.MASK_FORMER.CLASS_WEIGHT,
                 "loss_mask_projection": cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PROJECTION_WEIGHT
             }
-        elif supervision_type == "mask_projection_and_pairwise":
+        elif supervision_type == "mask_projection_and_spatial_pairwise":
             weight_dict = {
                 "loss_ce": cfg.MODEL.MASK_FORMER.CLASS_WEIGHT,
                 "loss_mask_projection": cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PROJECTION_WEIGHT,
-                "loss_mask_pairwise": cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE_WEIGHT
+                "loss_mask_spatial_pairwise": cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE_WEIGHT
             }
+        elif supervision_type == "mask_projection_and_spatial_pairwise_and_temporal_pairwise":
+            temporal_pairwise = True
+            weight_dict = {
+                "loss_ce": cfg.MODEL.MASK_FORMER.CLASS_WEIGHT,
+                "loss_mask_projection": cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PROJECTION_WEIGHT,
+                "loss_mask_spatial_pairwise": cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE_WEIGHT,
+                "loss_mask_temporal_pairwise": cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.TEMPORAL_PAIRWISE_WEIGHT
+            }
+
         else:
             raise Exception("Unknown mask_target_type type !!!")
 
@@ -182,7 +203,7 @@ class VideoMaskFormer(nn.Module):
                 eos_coef=no_object_weight,
                 losses=losses,
             )
-        elif supervision_type == "mask_projection_and_pairwise":
+        elif supervision_type == "mask_projection_and_spatial_pairwise":
             matcher = VideoHungarianMatcherProjPair(
                 cost_class=cfg.MODEL.MASK_FORMER.CLASS_WEIGHT,
                 cost_projection=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PROJECTION_WEIGHT,
@@ -192,8 +213,30 @@ class VideoMaskFormer(nn.Module):
                 pairwise_color_thresh=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.COLOR_THRESH,
                 pairwise_warmup_iters=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.WARMUP_ITERS,
             )
-            losses = ["labels", "projection_masks", "pairwise"]
-            criterion = VideoSetCriterionProjPair(
+            losses = ["labels", "projection_masks", "spatial_pairwise"]
+            criterion = VideoSetCriterionProjSpatPair(
+                sem_seg_head.num_classes,
+                matcher=matcher,
+                weight_dict=weight_dict,
+                eos_coef=no_object_weight,
+                pairwise_size=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.SIZE,
+                pairwise_dilation=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.DILATION,
+                pairwise_color_thresh=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.COLOR_THRESH,
+                pairwise_warmup_iters=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.WARMUP_ITERS,
+                losses=losses,
+            )
+        elif supervision_type == "mask_projection_and_spatial_pairwise_and_temporal_pairwise":
+            matcher = VideoHungarianMatcherProjPair(
+                cost_class=cfg.MODEL.MASK_FORMER.CLASS_WEIGHT,
+                cost_projection=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PROJECTION_WEIGHT,
+                cost_pairwise=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE_WEIGHT,
+                pairwise_size=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.SIZE,
+                pairwise_dilation=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.DILATION,
+                pairwise_color_thresh=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.COLOR_THRESH,
+                pairwise_warmup_iters=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.WARMUP_ITERS,
+            )
+            losses = ["labels", "projection_masks", "spatial_pairwise", "temporal_pairwise"]
+            criterion = VideoSetCriterionProjSpatPairTempPair(
                 sem_seg_head.num_classes,
                 matcher=matcher,
                 weight_dict=weight_dict,
@@ -224,7 +267,8 @@ class VideoMaskFormer(nn.Module):
             "num_frames": cfg.INPUT.SAMPLING_FRAME_NUM,
             "output_dir": cfg.OUTPUT_DIR,
             "pairwise_size": cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.SIZE,
-            "pairwise_dilation": cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.DILATION
+            "pairwise_dilation": cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.DILATION,
+            "temporal_pairwise": temporal_pairwise,
         }
 
     @property
@@ -282,7 +326,22 @@ class VideoMaskFormer(nn.Module):
         if self.training:
             # mask classification target
             if self.weak_supervision:
-                targets = self.prepare_weaksup_targets(batched_inputs, org_images)
+                org_dino_feats = None
+                if self.temporal_pairwise:
+                    org_dino_feats = []
+                    for video in batched_inputs:
+                        org_vid_dino_feats = []
+                        for ind, dino_feat in enumerate(video["dino_feat"]):
+                            org_vid_dino_feats.append(dino_feat.cpu())
+                        # for frame_name in video["file_names"]:
+                        #     org_vid_dino_feats.append(
+                        #         torch.load(
+                        #             frame_name.replace('JPEGImages', 'DINOv2_feats_vitg_480s').replace('jpg', 'pt'),
+                        #             map_location="cpu"
+                        #         )
+                        #     )
+                        org_dino_feats.append(org_vid_dino_feats)
+                targets = self.prepare_weaksup_targets(batched_inputs, org_images, org_dino_feats)
             else:
                 targets = self.prepare_targets(batched_inputs, images)
 
@@ -319,12 +378,16 @@ class VideoMaskFormer(nn.Module):
 
             return retry_if_cuda_oom(self.inference_video)(mask_cls_result, mask_pred_result, image_size, height, width, vid_path)
 
-    def prepare_weaksup_targets(self, targets, org_images):
+    def prepare_weaksup_targets(self, targets, org_images, org_dino_feats):
         """
         :param targets: [vid1[frame1, frame2], vid2[frame1, frame2]]
         :param org_images: [frame in (3, H, W)] * BT,
+        :param org_dino_feats: [[feats in (D, H, W)] * T] * B,
         :return:
         """
+        if self.temporal_pairwise:
+            assert org_dino_feats is not None
+
         B = len(targets)
         T = self.num_frames
 
@@ -346,7 +409,7 @@ class VideoMaskFormer(nn.Module):
             stride=stride, padding=0
         )
         _h, _w = downsampled_images.shape[-2:]
-        # (B * T, 3, H/4, W/4) --> (B, T, 3, W/4, H/4) --> (B, T, W/4, H/4, 3)
+        # (B * T, 3, H/4, W/4) --> (B, T, 3, W/4, H/4)
         downsampled_images = downsampled_images.reshape(B, T, 3, _h, _w)
         # (B*T, H, W) -> (B*T, h/4, W/4) -> (B, T, H/4, W/4)
         downsampled_image_masks = org_image_masks[:, start::stride, start::stride].reshape(B, T, _h, _w)
@@ -414,6 +477,83 @@ class VideoMaskFormer(nn.Module):
             top_bounds_per_video = top_bounds_full_per_video[:, :, start::stride] / stride
             bottom_bounds_per_video = bottom_bounds_full_per_video[:, :, start::stride] / stride
 
+            ##########################################################
+            ####### find temporal matching with dino feature #########
+            ##########################################################
+            if self.temporal_pairwise and org_dino_feats is not None:
+                org_dino_feats_per_video = torch.cat(org_dino_feats[vid_ind], dim=0)  # (T, D, H', W')
+                dino_feats_per_video = F.interpolate(
+                    org_dino_feats_per_video,
+                    size=(downsampled_images.shape[-2], downsampled_images.shape[-1]),
+                    mode='bilinear',
+                    align_corners=False
+                )  # (T, D, H/4, W/4)
+
+                gt_boxes_downsampled = BitMasks(
+                    gt_boxmasks_per_video.flatten(0, 1)
+                ).get_bounding_boxes().tensor.to(dtype=torch.int64).reshape(_num_instance, T, 4)  # (G, T, 4)
+
+                temp_pairs = []  # [[((k, 2), (k, 2))] * T-1] * G
+                for ins_i in range(_num_instance):
+                    boxes_4x_downsampled = gt_boxes_downsampled[ins_i]  # (T, 4)
+                    ws = boxes_4x_downsampled[:, 2] - boxes_4x_downsampled[:, 0]  # (T,)
+                    hs = boxes_4x_downsampled[:, 3] - boxes_4x_downsampled[:, 1]  # (T,)
+                    pos_areas = (ws * hs) > 0  # (T,)
+
+                    ins_temp_pairs = []
+                    for i in range(T - 1):
+                        if pos_areas[i:i + 2].all():
+                            # in XY
+                            coords_curr, coords_next = get_instance_temporal_pairs(
+                                dino_feats_per_video[i:i + 2, :, :, :],  # (2, D, H/4, W/4)
+                                boxes_4x_downsampled[i:i + 2],  # (T, 4)
+                                k=self.temporal_k
+                            )
+                        else:
+                            coords_curr = -torch.ones((0, 2), dtype=torch.int64)
+                            coords_next = -torch.ones((0, 2), dtype=torch.int64)
+                        ins_temp_pairs.append((coords_curr, coords_next))
+                    temp_pairs.append(ins_temp_pairs)
+
+
+                ##### DEBUG #####
+                # for ins_i in range(_num_instance):
+                #     for t in range(T - 1):
+                #         coords_curr, coords_next = temp_pairs[ins_i][t]
+                #
+                #         coords_next[:, 0] += downsampled_images[0, t].shape[-1]
+                #
+                #         canvas = np.ascontiguousarray(
+                #             torch.cat(
+                #                 [downsampled_images[0, t], downsampled_images[0, t + 1]], dim=-1
+                #             ).permute(1, 2, 0).cpu().numpy(),
+                #             dtype=np.uint8
+                #         )
+                #         mask = torch.cat(
+                #             [gt_boxmasks_per_video[ins_i, t], gt_boxmasks_per_video[ins_i, t + 1]], dim=-1
+                #         ).cpu().numpy()
+                #
+                #         if coords_curr.shape[0] > 0:
+                #             vis_number = 5
+                #             random_inds = random.sample(range(coords_curr.shape[0]), vis_number)
+                #             for coord_i in random_inds:
+                #                 cv2.line(
+                #                     canvas,
+                #                     (int(coords_curr[coord_i, 0].cpu()), int(coords_curr[coord_i, 1].cpu())),
+                #                     (int(coords_next[coord_i, 0].cpu()), int(coords_next[coord_i, 1].cpu())),
+                #                     (0, 0, int(255 * (coord_i + vis_number) / (2 * vis_number))),
+                #                     1
+                #                 )
+                #         cv2.imwrite(
+                #             '/home/user/Program/jwh/weakly-spvsd-vis/Weakly-Sup-VIS/DEBUG/mask_ins_{}.jpg'.format(ins_i),
+                #             cv2.resize(np.ascontiguousarray(mask, dtype=np.uint8) * 255, (mask.shape[1] * 4, mask.shape[0] * 4))
+                #         )
+                #         cv2.imwrite(
+                #             '/home/user/Program/jwh/weakly-spvsd-vis/Weakly-Sup-VIS/DEBUG/ins_{}.jpg'.format(ins_i),
+                #             cv2.resize(canvas, (canvas.shape[1] * 4, canvas.shape[0] * 4))
+                #         )
+
+
             gt_ids_per_video = torch.cat(gt_ids_per_video, dim=1)  # (N, num_frame)
             valid_idx = (gt_ids_per_video != -1).any(dim=-1)  # (num_ins,), 别取到再所有帧上都是空的gt
 
@@ -429,6 +569,7 @@ class VideoMaskFormer(nn.Module):
                     "top_bounds": top_bounds_per_video[valid_idx].float(),
                     "bottom_bounds": bottom_bounds_per_video[valid_idx].float(),
                     "color_similarities": color_similarity_per_video[valid_idx].float(),
+                    "temporal_pairs": temp_pairs if self.temporal_pairwise else None,
                 }
             )
         return gt_instances

@@ -6,3 +6,5 @@ from .build import *
 
 from .datasets import *
 from .ytvis_eval import YTVISEvaluator
+
+from .dataset_mapper_w_feat import YTVISDatasetWithFeatsMapper

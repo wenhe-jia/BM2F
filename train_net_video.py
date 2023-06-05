@@ -45,6 +45,7 @@ from detectron2.utils.logger import setup_logger
 # MaskFormer
 from mask2former import add_maskformer2_config
 from mask2former_video import (
+    YTVISDatasetWithFeatsMapper,
     YTVISDatasetMapper,
     YTVISEvaluator,
     add_maskformer2_video_config,
@@ -77,7 +78,11 @@ class Trainer(DefaultTrainer):
     @classmethod
     def build_train_loader(cls, cfg):
         dataset_name = cfg.DATASETS.TRAIN[0]
-        mapper = YTVISDatasetMapper(cfg, is_train=True)
+
+        if cfg.MODEL.MASK_FORMER.SUP_TYPE == "mask_projection_and_spatial_pairwise_and_temporal_pairwise":
+            mapper = YTVISDatasetWithFeatsMapper(cfg, is_train=True)
+        else:
+            mapper = YTVISDatasetMapper(cfg, is_train=True)
 
         dataset_dict = get_detection_dataset_dicts(
             dataset_name,

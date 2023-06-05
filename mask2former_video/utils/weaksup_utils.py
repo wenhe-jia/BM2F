@@ -57,56 +57,84 @@ def get_images_color_similarity(images, image_masks, kernel_size, dilation):
 
     return similarity * unfolded_weights
 
-def get_inconstant_point_coords_with_randomness(
-    coarse_logits, variance_func, num_points, oversample_ratio, importance_sample_ratio
+
+def get_obj_feats(feats_4x, boxes_4x):
+    """
+
+    :param feats_4x: (2, D, h, w)
+    :param boxes_4x: (2, 4)
+    :return:
+    """
+    # (D, h, w)
+    obj_curr_feats = feats_4x[0, :, boxes_4x[0, 1]:boxes_4x[0, 3], boxes_4x[0, 0]:boxes_4x[0, 2]]
+    obj_next_feats = feats_4x[1, :, boxes_4x[1, 1]:boxes_4x[1, 3], boxes_4x[1, 0]:boxes_4x[1, 2]]
+    return obj_curr_feats, obj_next_feats
+
+
+def generate_grid_coords(height, width):
+    h_coords = torch.linspace(0, height - 1, height, dtype=torch.int64)
+    w_coords = torch.linspace(0, width - 1, width, dtype=torch.int64)
+
+    ys, xs = torch.meshgrid(h_coords, w_coords)  # (h, w)
+
+    # xs = xs.transpose(0, 1)[:, :, None]
+    # ys = ys.transpose(0, 1)[:, :, None]
+    xs = xs[:, :, None]
+    ys = ys[:, :, None]
+
+    # (h, w, 2) -> (h*w, 2)
+    return torch.cat([xs, ys], dim=-1).flatten(0, 1)
+
+
+def calculate_patch_matching(
+    obj_curr_feats,
+    obj_next_feats,
+    boxes_curr_and_next,
+    topk_match=1,
 ):
-    """
-    Sample points in [0, 1] x [0, 1] coordinate space based on their uncertainty. The unceratinties
-        are calculated for each point using 'uncertainty_func' function that takes point's logit
-        prediction as input.
-    See PointRend paper for details.
+    if obj_next_feats.shape[0] < topk_match:
+        topk_match = obj_next_feats.shape[0]
 
-    Args:
-        coarse_logits (Tensor): A tensor of shape (N, k**2-1, Hmask, Wmask)
-        uncertainty_func: A function that takes a Tensor of shape (N, k**2-1, P) that
-            contains logit predictions for P points and returns their uncertainties as a Tensor of
-            shape (N, 1, P).
-        num_points (int): The number of points P to sample.
-        oversample_ratio (int): Oversampling parameter.
-        importance_sample_ratio (float): Ratio of points that are sampled via importnace sampling.
+    # (obj_curr_h * obj_curr_w, 2)
+    grid_coords_obj_curr = generate_grid_coords(obj_curr_feats.shape[1], obj_curr_feats.shape[2])
+    grid_coords_obj_curr[:, 0] += boxes_curr_and_next[0, 0]
+    grid_coords_obj_curr[:, 1] += boxes_curr_and_next[0, 1]
 
-    Returns:
-        point_coords (Tensor): A tensor of shape (N, P, 2) that contains the coordinates of P
-            sampled points.
-    """
-    assert oversample_ratio >= 1
-    assert importance_sample_ratio <= 1 and importance_sample_ratio >= 0
-    num_boxes = coarse_logits.shape[0]
-    num_sampled = int(num_points * oversample_ratio)
-    point_coords = torch.rand(num_boxes, num_sampled, 2, device=coarse_logits.device)  # (num_ins, 3*num_p, 2)
-    point_logits = point_sample(coarse_logits, point_coords, align_corners=False)  # (N, k**2-1, 3*num_p)
-    # It is crucial to calculate uncertainty based on the sampled prediction value for the points.
-    # Calculating uncertainties of the coarse predictions first and sampling them for points leads
-    # to incorrect results.
-    # To illustrate this: assume uncertainty_func(logits)=-abs(logits), a sampled point between
-    # two coarse predictions with -1 and 1 logits has 0 logits, and therefore 0 uncertainty value.
-    # However, if we calculate uncertainties for the coarse predictions first,
-    # both will have -1 uncertainty, and the sampled point will get -1 uncertainty.
-    point_uncertainties = variance_func(point_logits)  #（N, 1, 3*num_p)
-    num_uncertain_points = int(importance_sample_ratio * num_points)  # 0.75*num_p
-    num_random_points = num_points - num_uncertain_points  # num_p - int(0.25*num_p)
-    idx = torch.topk(point_uncertainties[:, 0, :], k=num_uncertain_points, dim=1)[1]  # (num_ins, 0.75*num_p)
-    shift = num_sampled * torch.arange(num_boxes, dtype=torch.long, device=coarse_logits.device)  # (num_ins)
-    idx += shift[:, None]  # (num_ins, 0.75*num_p)
-    point_coords = point_coords.view(-1, 2)[idx.view(-1), :].view(
-        num_boxes, num_uncertain_points, 2
+    grid_coords_obj_next = generate_grid_coords(obj_next_feats.shape[1], obj_next_feats.shape[2])
+    grid_coords_obj_next[:, 0] += boxes_curr_and_next[1, 0]
+    grid_coords_obj_next[:, 1] += boxes_curr_and_next[1, 1]
+
+    obj_curr_feats = obj_curr_feats.flatten(1, 2).permute(1, 0)  # (obj_curr_h * obj_curr_w, C)
+    obj_next_feats = obj_next_feats.flatten(1, 2).permute(1, 0)  # (obj_next_h * obj_next_w, C)
+
+    # select one point in current frame
+    # random_ind = random.sample(range(grid_coords_obj_curr.shape[0]), 3 if 3 <= grid_coords_obj_curr.shape[0] else grid_coords_obj_curr.shape[0])
+    # grid_coords_obj_curr = grid_coords_obj_curr[random_ind]
+    # obj_curr_feats = obj_curr_feats[random_ind]
+
+    dist_mtrx = torch.cdist(obj_curr_feats, obj_next_feats, p=2)  # (obj_curr_h * obj_curr_w, obj_next_h * obj_next_w)
+    match_inds = torch.argsort(dist_mtrx, dim=1)[:, :topk_match]  # (im1_fg_num, im2_fg_num)
+
+    # XY
+    obj_curr_matched_coords = grid_coords_obj_curr[:, None].repeat(1, topk_match, 1).flatten(0, 1)
+
+    obj_next_candidate_coords = grid_coords_obj_next[None].repeat(grid_coords_obj_curr.shape[0], 1, 1)
+    obj_next_candidate_xs = obj_next_candidate_coords[:, :, 0]
+    obj_next_candidate_ys = obj_next_candidate_coords[:, :, 1]
+
+    obj_next_xs = obj_next_candidate_xs.gather(1, match_inds)
+    obj_next_ys = obj_next_candidate_ys.gather(1, match_inds)
+    obj_next_matched_coords = torch.cat([obj_next_xs[:, :, None], obj_next_ys[:, :, None]], dim=2).flatten(0, 1)
+
+    return obj_curr_matched_coords, obj_next_matched_coords
+
+
+def get_instance_temporal_pairs(feats, boxes, k=1):
+    obj_curr_feats, obj_next_feats = get_obj_feats(feats, boxes)
+
+    curr_matched_coords, next_matched_coords = calculate_patch_matching(
+        obj_curr_feats, obj_next_feats, boxes, topk_match=k
     )
-    if num_random_points > 0:
-        point_coords = cat(
-            [
-                point_coords,
-                torch.rand(num_boxes, num_random_points, 2, device=coarse_logits.device),
-            ],
-            dim=1,
-        )
-    return point_coords
+    assert curr_matched_coords.shape == next_matched_coords.shape
+
+    return curr_matched_coords, next_matched_coords
