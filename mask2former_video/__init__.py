@@ -5,7 +5,8 @@ from . import modeling
 from .config import add_maskformer2_video_config
 
 # models
-from .video_maskformer_model import VideoMaskFormer
+# from .video_maskformer_model import VideoMaskFormer
+from .video_maskformer_model_WithColor import VideoMaskFormer
 
 # video
 from .data_video import (

@@ -7,6 +7,7 @@ import random
 import numpy as np
 from typing import List, Union
 import torch
+import torch.nn.functional as F
 
 from detectron2.config import configurable
 from detectron2.structures import (
@@ -22,6 +23,18 @@ from detectron2.data import transforms as T
 from .augmentation import build_augmentation
 
 __all__ = ["YTVISDatasetWithFeatsMapper"]
+
+
+def get_dino_input_size(im, short_edge=480):
+    h, w = im.shape[:2]
+    if h >= w:
+        new_w = short_edge
+        new_h = int(h * new_w / w)
+    else:
+        new_h = short_edge
+        new_w = int(w * new_h / h)
+
+    return new_h, new_w
 
 
 def filter_empty_instances(instances, by_box=True, by_mask=True, box_threshold=1e-5):
@@ -226,17 +239,31 @@ class YTVISDatasetWithFeatsMapper:
 
             aug_input = T.AugInput(image)
             transforms = self.augmentations(aug_input)
-            image = aug_input.image
+            image_aug = aug_input.image
 
-            image_shape = image.shape[:2]  # h, w
+            image_aug_shape = image_aug.shape[:2]  # h, w
             # Pytorch's dataloader is efficient on torch.Tensor due to shared-memory,
             # but not efficient on large generic data structures due to the use of pickle & mp.Queue.
             # Therefore it's important to use torch.Tensor.
-            dataset_dict["image"].append(torch.as_tensor(np.ascontiguousarray(image.transpose(2, 0, 1))))
+            dataset_dict["image"].append(torch.as_tensor(np.ascontiguousarray(image_aug.transpose(2, 0, 1))))
 
-            # load features of DINOv2
-            feat_file_path = file_names[frame_idx].replace('JPEGImages', 'DINOv2_feats_vitg_480s').replace('jpg', 'pt')
-            dinov2_feats = torch.load(feat_file_path, map_location="cpu")  # (dino_dim, h, w)
+            ##### load features of DINOv2 #####
+            feat_file_path = file_names[frame_idx].replace('JPEGImages', 'DINOv2_feats_vits_480s').replace('jpg', 'pt')
+            dinov2_feats = torch.load(feat_file_path, map_location="cpu")    # (1, dino_dim, h, w)
+
+            dino_img_h, dino_img_w = get_dino_input_size(image)
+            dinov2_feats = F.interpolate(
+                dinov2_feats,
+                size=(dinov2_feats.shape[-2] * 14, dinov2_feats.shape[-1] * 14),
+                mode="bilinear",
+                align_corners=False
+            )[:, :, :dino_img_h, :dino_img_w]
+            dinov2_feats = F.interpolate(
+                dinov2_feats,
+                size=(image_aug_shape[0], image_aug_shape[1]),
+                mode="bilinear",
+                align_corners=False
+            )
             dataset_dict["dino_feat"].append(dinov2_feats)
 
             if (video_annos is None) or (not self.is_train):
@@ -252,7 +279,7 @@ class YTVISDatasetWithFeatsMapper:
 
             # USER: Implement additional transformations if you have other types of data
             annos = [
-                utils.transform_instance_annotations(obj, transforms, image_shape)
+                utils.transform_instance_annotations(obj, transforms, image_aug_shape)
                 for obj in _frame_annos
                 if obj.get("iscrowd", 0) == 0
             ]
@@ -264,14 +291,14 @@ class YTVISDatasetWithFeatsMapper:
                 sorted_annos[idx] = _anno
             _gt_ids = [_anno["id"] for _anno in sorted_annos]
 
-            instances = utils.annotations_to_instances(sorted_annos, image_shape, mask_format="bitmask")
+            instances = utils.annotations_to_instances(sorted_annos, image_aug_shape, mask_format="bitmask")
             instances.gt_ids = torch.tensor(_gt_ids)
             if instances.has("gt_masks"):
                 instances.gt_boxes = instances.gt_masks.get_bounding_boxes()
                 instances = filter_empty_instances(instances)
             else:
                 # 在选的两帧上都没有object，所有的sorted_annos, ids, _frame_annos都是空的
-                instances.gt_masks = BitMasks(torch.empty((0, *image_shape)))  # tensor([]), shape in (0, h, w)
+                instances.gt_masks = BitMasks(torch.empty((0, *image_aug_shape)))  # tensor([]), shape in (0, h, w)
                 instances.gt_boxes = instances.gt_masks.get_bounding_boxes()  # tensor([]), shape in (0, 4)
 
             dataset_dict["instances"].append(instances)

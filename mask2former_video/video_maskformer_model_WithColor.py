@@ -1,6 +1,7 @@
 # Copyright (c) Facebook, Inc. and its affiliates.
 import logging
 import math
+import sys
 from typing import Tuple
 
 import torch
@@ -20,7 +21,7 @@ from .modeling.criterion_proj_spatpair_temppair import VideoSetCriterionProjSpat
 from .modeling.matcher import VideoHungarianMatcherProj, VideoHungarianMatcherProjPair
 from .utils.memory import retry_if_cuda_oom
 
-from .utils.weaksup_utils import unfold_wo_center, get_images_color_similarity, get_instance_temporal_pairs
+from .utils.weaksup_utils import unfold_wo_center, get_images_color_similarity, get_instance_temporal_pairs,filter_temporal_pairs_by_color_similarity
 
 import os
 import cv2
@@ -61,6 +62,8 @@ class VideoMaskFormer(nn.Module):
         pairwise_size,
         pairwise_dilation,
         temporal_pairwise,
+        temporal_topk,
+        temporal_color_threshold,
     ):
         """
         Args:
@@ -114,8 +117,8 @@ class VideoMaskFormer(nn.Module):
         self.output_dir = output_dir
 
         # TEMPORAL USAGE, TODO: MAKE IT CONFIGURABLE
-        self.dino_feat_dim = 1536
-        self.temporal_k = 1
+        self.temporal_topk = temporal_topk
+        self.temp_color_thr = temporal_color_threshold
 
     @classmethod
     def from_config(cls, cfg):
@@ -269,6 +272,8 @@ class VideoMaskFormer(nn.Module):
             "pairwise_size": cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.SIZE,
             "pairwise_dilation": cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.DILATION,
             "temporal_pairwise": temporal_pairwise,
+            "temporal_topk": cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.TOPK,
+            "temporal_color_threshold": cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.COLOR_THRESH,
         }
 
     @property
@@ -333,7 +338,7 @@ class VideoMaskFormer(nn.Module):
                         org_vid_dino_feats = []
                         for ind, dino_feat in enumerate(video["dino_feat"]):
                             # org_vid_dino_feats.append(dino_feat.cpu())
-                            org_vid_dino_feats.append(dino_feat.to(self.device))
+                            org_vid_dino_feats.append(dino_feat.half())
 
                         # for frame_name in video["file_names"]:
                         #     org_vid_dino_feats.append(
@@ -347,8 +352,11 @@ class VideoMaskFormer(nn.Module):
             else:
                 targets = self.prepare_targets(batched_inputs, images)
 
+            print("targets prepared at cuda ===== {} =====".format(self.device))
+
             # bipartite matching-based loss
             losses = self.criterion(outputs, targets)
+            print("losses calculated at cuda +++++ {} +++++".format(self.device))
 
             for k in list(losses.keys()):
                 if k in self.criterion.weight_dict:
@@ -367,6 +375,7 @@ class VideoMaskFormer(nn.Module):
                 losses.update(
                     {"loss_pos_temp_pair_prop": (pos_temppair_vid / torch.clamp(temppair_vid, min=1.0)).detach()}
                 )
+            print("losses updated at cuda ----- {} -----".format(self.device))
 
             return losses
         else:
@@ -448,6 +457,8 @@ class VideoMaskFormer(nn.Module):
             color_similarity_shape = [_num_instance, T, self.pairwise_size * self.pairwise_size - 1, _h, _w]
             color_similarity_per_video = torch.zeros(color_similarity_shape, dtype=torch.float32, device=self.device)
 
+            frame_lab_vid = []
+
             # rectangle gt mask from boxes for mask projection loss
             # TODO: add images_color_similarity for pairwise loss
             gt_ids_per_video = []
@@ -467,6 +478,7 @@ class VideoMaskFormer(nn.Module):
                     frame_lab, downsampled_image_masks[vid_ind, f_i],
                     self.pairwise_size, self.pairwise_dilation
                 )  # (1, k*k-1, H/4, W/4)
+                frame_lab_vid.append(frame_lab[0])
 
                 # generate rectangle gt masks from boxes of shape (N, 4) in abs coordinates
                 if len(targets_per_frame) > 0:
@@ -506,9 +518,10 @@ class VideoMaskFormer(nn.Module):
                 org_dino_feats_full_per_video = torch.cat(org_dino_feats[vid_ind], dim=0)  # (T, D, H', W')
                 dino_dim, h_org, w_org = org_dino_feats_full_per_video.shape[1:]
                 dino_feats_full_per_video = torch.zeros(
-                    (T, dino_dim, h_pad, w_pad), dtype=torch.float32, device=self.device
+                    (T, dino_dim, h_pad, w_pad), dtype=torch.float16, device=self.device
                 )
                 dino_feats_full_per_video[:, :, :h_org, :w_org] = org_dino_feats_full_per_video
+
                 dino_feats_per_video = F.interpolate(
                     dino_feats_full_per_video,
                     size=(downsampled_images.shape[-2], downsampled_images.shape[-1]),
@@ -518,7 +531,7 @@ class VideoMaskFormer(nn.Module):
 
                 gt_boxes_downsampled = BitMasks(
                     gt_boxmasks_per_video.flatten(0, 1)
-                ).get_bounding_boxes().tensor.to(dtype=torch.int64).reshape(_num_instance, T, 4)  # (G, T, 4)
+                ).get_bounding_boxes().tensor.to(dtype=torch.int32).reshape(_num_instance, T, 4)  # (G, T, 4)
 
                 temp_pairs = []  # [[((k, 2), (k, 2))] * T-1] * G
                 for ins_i in range(_num_instance):
@@ -534,9 +547,14 @@ class VideoMaskFormer(nn.Module):
                             coords_curr, coords_next = get_instance_temporal_pairs(
                                 dino_feats_per_video[i:i + 2, :, :, :],  # (2, D, H/4, W/4)
                                 boxes_4x_downsampled[i:i + 2],  # (T, 4)
-                                k=self.temporal_k
+                                k=self.temporal_topk
                             )
 
+                            coords_curr, coords_next = filter_temporal_pairs_by_color_similarity(
+                                coords_curr, coords_next,
+                                frame_lab_vid[i], frame_lab_vid[i + 1],
+                                color_similarity_threshold=self.temp_color_thr
+                            )
 
                             ##### DEBUG #####
                             num_match_per_video += torch.tensor(
@@ -549,11 +567,9 @@ class VideoMaskFormer(nn.Module):
                                 gt_masks_per_video[ins_i, i+1].float(),
                             ).clone().detach()
 
-
-
                         else:
-                            coords_curr = -torch.ones((0, 2), dtype=torch.int64)
-                            coords_next = -torch.ones((0, 2), dtype=torch.int64)
+                            coords_curr = torch.ones((0, 2), dtype=torch.int32).int()
+                            coords_next = torch.ones((0, 2), dtype=torch.int32).int()
                         ins_temp_pairs.append((coords_curr, coords_next))
                     temp_pairs.append(ins_temp_pairs)
 
@@ -695,6 +711,8 @@ class VideoMaskFormer(nn.Module):
 
 
 def calculate_matching_pos(curr_kps, next_kps, curr_mask, next_mask):
+    curr_kps = curr_kps.long()
+    next_kps = next_kps.long()
     curr_label = curr_mask[curr_kps[:, 1], curr_kps[:, 0]]
     next_label = next_mask[next_kps[:, 1], next_kps[:, 0]]
     pos_match = ((curr_label - next_label) == 0).float().sum()

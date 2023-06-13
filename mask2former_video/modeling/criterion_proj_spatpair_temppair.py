@@ -280,6 +280,7 @@ class VideoSetCriterionProjSpatPairTempPair(nn.Module):
             for tgt_i in batch_tgt_indices:
                 target_pairs.append(tgt_pairs_src[tgt_i])
 
+        del targets
         # target_pairs = [t['temporal_pairs'][i] for t, (_, i) in zip(targets, indices)]  # [[((k, 2), (k, 2))] * T-1] * G
 
         if src_idx[0].shape[0] > 0:
@@ -302,8 +303,8 @@ class VideoSetCriterionProjSpatPairTempPair(nn.Module):
                         calculate_temp_similarities(
                             src_masks[ins_i, t_i, :, :],
                             src_masks[ins_i, t_i + 1, :, :],
-                            pairs[0].to(dtype=torch.int64),
-                            pairs[1].to(dtype=torch.int64),
+                            pairs[0].long(),
+                            pairs[1].long(),
                         )
                     )
                 ins_src_similarities = torch.cat(ins_src_similarities, dim=0)

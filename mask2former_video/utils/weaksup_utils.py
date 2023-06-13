@@ -1,5 +1,8 @@
+from skimage import color
+
 import torch
 import torch.nn.functional as F
+from torch.cuda.amp import autocast
 
 from detectron2.projects.point_rend.point_features import point_sample
 from detectron2.layers import cat
@@ -72,8 +75,8 @@ def get_obj_feats(feats_4x, boxes_4x):
 
 
 def generate_grid_coords(height, width):
-    h_coords = torch.linspace(0, height - 1, height, dtype=torch.int64)
-    w_coords = torch.linspace(0, width - 1, width, dtype=torch.int64)
+    h_coords = torch.linspace(0, height - 1, height, dtype=torch.int32)
+    w_coords = torch.linspace(0, width - 1, width, dtype=torch.int32)
 
     ys, xs = torch.meshgrid(h_coords, w_coords)  # (h, w)
 
@@ -92,14 +95,29 @@ def calculate_patch_matching(
     boxes_curr_and_next,
     topk_match=1,
 ):
-    if obj_next_feats.shape[0] < topk_match:
-        topk_match = obj_next_feats.shape[0]
+    """
+
+    :param obj_curr_feats: (D, h_curr, w_curr)
+    :param obj_next_feats: (D, h_next, w_enxt)
+    :param boxes_curr_and_next: (2, 4)
+    :param topk_match: int
+    :return:
+    """
+    next_feat_num = obj_next_feats.shape[1] * obj_next_feats.shape[2]
+    if next_feat_num < topk_match:
+        topk_match = next_feat_num
 
     # (obj_curr_h * obj_curr_w, 2)
+    # grid_coords_obj_curr = generate_grid_coords(
+    #     obj_curr_feats.shape[1], obj_curr_feats.shape[2]
+    # ).to(device=obj_curr_feats.device)  # DEBUG
     grid_coords_obj_curr = generate_grid_coords(obj_curr_feats.shape[1], obj_curr_feats.shape[2])
     grid_coords_obj_curr[:, 0] += boxes_curr_and_next[0, 0]
     grid_coords_obj_curr[:, 1] += boxes_curr_and_next[0, 1]
 
+    # grid_coords_obj_next = generate_grid_coords(
+    #     obj_next_feats.shape[1], obj_next_feats.shape[2]
+    # ).to(device=obj_curr_feats.device)  # DEBUG
     grid_coords_obj_next = generate_grid_coords(obj_next_feats.shape[1], obj_next_feats.shape[2])
     grid_coords_obj_next[:, 0] += boxes_curr_and_next[1, 0]
     grid_coords_obj_next[:, 1] += boxes_curr_and_next[1, 1]
@@ -112,8 +130,15 @@ def calculate_patch_matching(
     # grid_coords_obj_curr = grid_coords_obj_curr[random_ind]
     # obj_curr_feats = obj_curr_feats[random_ind]
 
-    dist_mtrx = torch.cdist(obj_curr_feats, obj_next_feats, p=2)  # (obj_curr_h * obj_curr_w, obj_next_h * obj_next_w)
-    match_inds = torch.argsort(dist_mtrx, dim=1)[:, :topk_match]  # (im1_fg_num, im2_fg_num)
+    # with autocast(enabled=True):
+    # mem_bef_mtrx = torch.cuda.memory_allocated()
+    # dist_mtrx = -torch.cdist(obj_curr_feats, obj_next_feats, p=2).half()  # DEBUG
+    dist_mtrx = torch.cdist(obj_curr_feats, obj_next_feats, p=2).cpu()  # (obj_curr_h * obj_curr_w, obj_next_h * obj_next_w)
+    # mem_af_mtrx = torch.cuda.memory_allocated()
+    # print("after mtrx:", (torch.cuda.memory_allocated() - mem_bef_mtrx) / 1024**2, "MB", dist_mtrx.shape, dist_mtrx.dtype)
+    # match_inds = torch.argsort(dist_mtrx, dim=1)[:, :topk_match]  # (im1_fg_num, im2_fg_num)
+    match_inds = dist_mtrx.topk(k=topk_match, dim=1)[1]
+    # print("after sort:", (torch.cuda.memory_allocated() - mem_af_mtrx) / 1024 ** 2, "MB", match_inds.dtype)
 
     # XY
     obj_curr_matched_coords = grid_coords_obj_curr[:, None].repeat(1, topk_match, 1).flatten(0, 1)
@@ -126,7 +151,7 @@ def calculate_patch_matching(
     obj_next_ys = obj_next_candidate_ys.gather(1, match_inds)
     obj_next_matched_coords = torch.cat([obj_next_xs[:, :, None], obj_next_ys[:, :, None]], dim=2).flatten(0, 1)
 
-    return obj_curr_matched_coords, obj_next_matched_coords
+    return obj_curr_matched_coords.int(), obj_next_matched_coords.int()
 
 
 def get_instance_temporal_pairs(feats, boxes, k=1):
@@ -138,3 +163,37 @@ def get_instance_temporal_pairs(feats, boxes, k=1):
     assert curr_matched_coords.shape == next_matched_coords.shape
 
     return curr_matched_coords, next_matched_coords
+
+
+def filter_temporal_pairs_by_color_similarity(
+    coords_curr,
+    coords_next,
+    frame_lab_curr,
+    frame_lab_next,
+    color_similarity_threshold=0.3,
+):
+    """
+
+    :param coords_curr: (k, 2)
+    :param coords_next: (k, 2)
+    :param image_curr: tensor(3, h, w)
+    :param image_next: tensor(3, h, w)
+    :param color_similarity_threshold:
+    :return: coords_curr, coords_next
+    """
+
+    # (h, w, 3)
+    # frame_lab_curr = color.rgb2lab(image_curr.byte().permute(1, 2, 0).cpu().numpy())
+    # frame_lab_next = color.rgb2lab(image_next.byte().permute(1, 2, 0).cpu().numpy())
+    # torch.as_tensor(frame_lab, device=downsampled_images.device, dtype=torch.float32)
+
+    # （3, k)
+    lab_pix_curr = frame_lab_curr[:, coords_curr[:, 1].long(), coords_curr[:, 0].long()]
+    lab_pix_next = frame_lab_next[:, coords_next[:, 1].long(), coords_next[:, 0].long()]
+
+    diff = lab_pix_curr - lab_pix_next
+    similarity = torch.exp(-torch.norm(diff, dim=0) * 0.5)  # (k,)
+    keep_ind = torch.where(similarity >= color_similarity_threshold)[0].cpu()
+    # keep_ind = torch.where(similarity >= color_similarity_threshold)[0]  # DEBUG
+
+    return coords_curr[keep_ind], coords_next[keep_ind]
