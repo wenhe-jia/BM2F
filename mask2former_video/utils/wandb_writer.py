@@ -15,6 +15,31 @@ class WandBWriter(EventWriter):
             window_size (int): the scalars will be median-smoothed by this window size
             kwargs: other arguments passed to `torch.utils.tensorboard.SummaryWriter(...)`
         """
+        addition_args = {}
+
+        """
+            cfg.WANDB = CN({"ENABLED": False})
+            cfg.WANDB.ENTITY = "bzty"
+            cfg.WANDB.NAME = ""
+            cfg.WANDB.PROJECT = ""
+            cfg.WANDB.GROUP = ""
+            cfg.WANDB.RESUME = 'None'
+            cfg.WANDB.RESUME_ID = ''
+        """
+
+        if cfg.WANDB.RESUME_ID != '':
+            addition_args['id'] = cfg.WANDB.RESUME_ID
+            addition_args['resume'] = 'must'
+
+        if 'True' in cfg.WANDB.RESUME:
+            addition_args['resume'] = True
+        elif 'None' in cfg.WANDB.RESUME:
+            addition_args['resume'] = None
+        elif cfg.WANDB.RESUME in [ 'auto', 'allow', 'never', 'must']:
+            addition_args['resume'] = cfg.WANDB.RESUME
+        else:
+            raise ValueError('WANDB.RESUME should be one of [True, False, None, "auto", "allow", "never", "must"]')
+
         self.cfg = cfg
         wandb.init(
             entity=cfg.WANDB.ENTITY,
