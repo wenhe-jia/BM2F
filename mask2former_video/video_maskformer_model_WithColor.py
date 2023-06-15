@@ -459,7 +459,8 @@ class VideoMaskFormer(nn.Module):
             color_similarity_shape = [_num_instance, T, self.pairwise_size * self.pairwise_size - 1, _h, _w]
             color_similarity_per_video = torch.zeros(color_similarity_shape, dtype=torch.float32, device=self.device)
 
-            frame_lab_vid = []
+            if self.temporal_pairwise:
+                frame_lab_vid = []
 
             # rectangle gt mask from boxes for mask projection loss
             # TODO: add images_color_similarity for pairwise loss
@@ -480,7 +481,8 @@ class VideoMaskFormer(nn.Module):
                     frame_lab, downsampled_image_masks[vid_ind, f_i],
                     self.pairwise_size, self.pairwise_dilation
                 )  # (1, k*k-1, H/4, W/4)
-                frame_lab_vid.append(frame_lab[0])
+                if self.temporal_pairwise:
+                    frame_lab_vid.append(frame_lab[0])
 
                 # generate rectangle gt masks from boxes of shape (N, 4) in abs coordinates
                 if len(targets_per_frame) > 0:
