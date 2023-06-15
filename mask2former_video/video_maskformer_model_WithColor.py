@@ -340,6 +340,7 @@ class VideoMaskFormer(nn.Module):
             if self.weak_supervision:
                 org_dino_feats = None
                 if self.temporal_pairwise:
+                    print('\n ----- \n collect DINO feature \n ----- \n')
                     org_dino_feats = []
                     for video in batched_inputs:
                         org_vid_dino_feats = []
@@ -368,6 +369,7 @@ class VideoMaskFormer(nn.Module):
 
             # with open("/home/jiawenhe/projects/weaksup-vis/log_{}.txt".format(self.device), "a") as f:
             #     f.write("+++++ loss updated, losses: {}\n".format(losses))
+
             ##### DEBUG #####
             # if self.temporal_pairwise:
             #     temppair_vid = targets[0]["total_temp_pair"]
@@ -446,7 +448,7 @@ class VideoMaskFormer(nn.Module):
 
             mask_shape = [_num_instance, T, h_pad, w_pad]
             gt_boxmasks_full_per_video = torch.zeros(mask_shape, dtype=torch.float32, device=self.device)
-            gt_masks_full_per_video = torch.zeros(mask_shape, dtype=torch.bool, device=self.device)
+            # gt_masks_full_per_video = torch.zeros(mask_shape, dtype=torch.bool, device=self.device)
 
             # x_bound_shape = [_num_instance, T, h_pad]
             # left_bounds_full_per_video = torch.zeros(x_bound_shape, dtype=torch.float32, device=self.device)
@@ -469,8 +471,8 @@ class VideoMaskFormer(nn.Module):
                 targets_per_frame = targets_per_frame.to(self.device)
                 gt_ids_per_video.append(targets_per_frame.gt_ids[:, None])  # [(num_ins, 1), (num_ins, 1)]
 
-                h, w = targets_per_frame.image_size
-                gt_masks_full_per_video[:, f_i, :h, :w] = targets_per_frame.gt_masks.tensor
+                # h, w = targets_per_frame.image_size
+                # gt_masks_full_per_video[:, f_i, :h, :w] = targets_per_frame.gt_masks.tensor
 
                 # color similarity
                 # (H/4, W/4, 3)
@@ -507,7 +509,7 @@ class VideoMaskFormer(nn.Module):
 
             # (G, T, h_pad/4, w_pad/4)
             gt_boxmasks_per_video = gt_boxmasks_full_per_video[:, :, start::stride, start::stride]
-            gt_masks_per_video = gt_masks_full_per_video[:, :, start::stride, start::stride]
+            # gt_masks_per_video = gt_masks_full_per_video[:, :, start::stride, start::stride]
             # left_bounds_per_video = left_bounds_full_per_video[:, :, start::stride] / stride
             # right_bounds_per_video = right_bounds_full_per_video[:, :, start::stride] / stride
             # top_bounds_per_video = top_bounds_full_per_video[:, :, start::stride] / stride
@@ -518,6 +520,7 @@ class VideoMaskFormer(nn.Module):
             ##########################################################
 
             if self.temporal_pairwise and org_dino_feats is not None:
+                print('\n ~~~~~ \n prepare for temporal matching coords \n ~~~~~ \n')
                 num_match_per_video = torch.tensor(0, dtype=torch.float32, device=self.device)
                 num_pos_match_per_video = torch.tensor(0, dtype=torch.float32, device=self.device)
 
@@ -628,15 +631,15 @@ class VideoMaskFormer(nn.Module):
                 {
                     "labels": gt_classes_per_video, "ids": gt_ids_per_video,
                     "box_masks": gt_boxmasks_per_video[valid_idx].float(),
-                    "masks": gt_masks_per_video[valid_idx].float(),
+                    # "masks": gt_masks_per_video[valid_idx].float(),
                     # "left_bounds": left_bounds_per_video[valid_idx].float(),
                     # "right_bounds": right_bounds_per_video[valid_idx].float(),
                     # "top_bounds": top_bounds_per_video[valid_idx].float(),
                     # "bottom_bounds": bottom_bounds_per_video[valid_idx].float(),
                     "color_similarities": color_similarity_per_video[valid_idx].float(),
-                    "temporal_pairs": temp_pairs if self.temporal_pairwise else None,
-                    "total_temp_pair": num_match_per_video if self.temporal_pairwise else None,
-                    "pos_temp_pair": num_pos_match_per_video if self.temporal_pairwise else None,
+                    # "temporal_pairs": temp_pairs if self.temporal_pairwise else None,
+                    # "total_temp_pair": num_match_per_video if self.temporal_pairwise else None,
+                    # "pos_temp_pair": num_pos_match_per_video if self.temporal_pairwise else None,
                 }
             )
         return gt_instances

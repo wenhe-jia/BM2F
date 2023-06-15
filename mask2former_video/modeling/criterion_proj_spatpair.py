@@ -217,9 +217,6 @@ class VideoSetCriterionProjSpatPair(nn.Module):
             del src_masks_x, src_masks_y
             del target_boxmasks_x, target_boxmasks_y
         else:
-            """
-            bellow is for original projection loss and limited projection loss
-            """
             losses = {"loss_mask_projection": torch.tensor([0], dtype=torch.float32, device=src_masks.device)}
 
         del src_masks

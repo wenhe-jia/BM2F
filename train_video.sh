@@ -13,7 +13,8 @@ python train_net_video.py \
   --dist-url auto \
   --num-gpus 4 \
   --config-file configs/youtubevis_2021_mini/video_maskformer2_R50_bs16_8k_proj_spatpair_batch4.yaml \
-  OUTPUT_DIR Baseline_batch4 \
-  WANDB.ENABLED True \
+  OUTPUT_DIR Baseline_batch4_FixInterval \
+  SEED 41344227 \
+  WANDB.ENABLED False \
   WANDB.ENTITY garvinxxx \
-  WANDB.NAME Baseline_batch4
+  WANDB.NAME Baseline_batch4_FixInterval
