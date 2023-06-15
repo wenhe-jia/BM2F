@@ -118,26 +118,26 @@ class VideoSetCriterionProj(nn.Module):
         target_boxmasks = torch.cat(
             [t['box_masks'][i] for t, (_, i) in zip(targets, indices)]
         ).to(src_masks)
-        target_left_bounds = torch.cat(
-            [t['left_bounds'][i] for t, (_, i) in zip(targets, indices)]
-        ).to(src_masks)
-        target_right_bounds = torch.cat(
-            [t['right_bounds'][i] for t, (_, i) in zip(targets, indices)]
-        ).to(src_masks)
-        target_top_bounds = torch.cat(
-            [t['top_bounds'][i] for t, (_, i) in zip(targets, indices)]
-        ).to(src_masks)
-        target_bottom_bounds = torch.cat(
-            [t['bottom_bounds'][i] for t, (_, i) in zip(targets, indices)]
-        ).to(src_masks)
+        # target_left_bounds = torch.cat(
+        #     [t['left_bounds'][i] for t, (_, i) in zip(targets, indices)]
+        # ).to(src_masks)
+        # target_right_bounds = torch.cat(
+        #     [t['right_bounds'][i] for t, (_, i) in zip(targets, indices)]
+        # ).to(src_masks)
+        # target_top_bounds = torch.cat(
+        #     [t['top_bounds'][i] for t, (_, i) in zip(targets, indices)]
+        # ).to(src_masks)
+        # target_bottom_bounds = torch.cat(
+        #     [t['bottom_bounds'][i] for t, (_, i) in zip(targets, indices)]
+        # ).to(src_masks)
 
         # (N, T, H_pad/4, W_pad/4) -> (NT, 1, H_pad/4, W_pad/4)
         src_masks = src_masks.flatten(0, 1)[:, None]
         target_boxmasks = target_boxmasks.flatten(0, 1)[:, None]
-        target_left_bounds = target_left_bounds.flatten()  # (NTH)
-        target_right_bounds = target_right_bounds.flatten()  # (NTH)
-        target_top_bounds = target_top_bounds.flatten()  # (NTW)
-        target_bottom_bounds = target_bottom_bounds.flatten()  # (NTW)
+        # target_left_bounds = target_left_bounds.flatten()  # (NTH)
+        # target_right_bounds = target_right_bounds.flatten()  # (NTH)
+        # target_top_bounds = target_top_bounds.flatten()  # (NTW)
+        # target_bottom_bounds = target_bottom_bounds.flatten()  # (NTW)
 
         if src_idx[0].shape[0] > 0:
             """

@@ -306,6 +306,10 @@ class VideoMaskFormer(nn.Module):
                     segments_info (list[dict]): Describe each segment in `panoptic_seg`.
                         Each dict contains keys "id", "category_id", "isthing".
         """
+
+        # with open("/home/jiawenhe/projects/weaksup-vis/log_{}.txt".format(self.device), "a") as f:
+        #     f.write("+ data loaded\n")
+
         if not self.training:
             print('\n--- video: {} | name: {} | length: {}--- \n'.format(
                     batched_inputs[0]['video_id'],
@@ -328,6 +332,9 @@ class VideoMaskFormer(nn.Module):
         features = self.backbone(images.tensor)
         outputs = self.sem_seg_head(features)
 
+        # with open("/home/jiawenhe/projects/weaksup-vis/log_{}.txt".format(self.device), "a") as f:
+        #     f.write("++ model forwarded\n")
+
         if self.training:
             # mask classification target
             if self.weak_supervision:
@@ -337,26 +344,20 @@ class VideoMaskFormer(nn.Module):
                     for video in batched_inputs:
                         org_vid_dino_feats = []
                         for ind, dino_feat in enumerate(video["dino_feat"]):
-                            # org_vid_dino_feats.append(dino_feat.cpu())
                             org_vid_dino_feats.append(dino_feat.half())
-
-                        # for frame_name in video["file_names"]:
-                        #     org_vid_dino_feats.append(
-                        #         torch.load(
-                        #             frame_name.replace('JPEGImages', 'DINOv2_feats_vitg_480s').replace('jpg', 'pt'),
-                        #             map_location="cpu"
-                        #         )
-                        #     )
                         org_dino_feats.append(org_vid_dino_feats)
                 targets = self.prepare_weaksup_targets(batched_inputs, org_images, org_dino_feats)
             else:
                 targets = self.prepare_targets(batched_inputs, images)
 
-            print("targets prepared at cuda ===== {} =====".format(self.device))
+            # with open("/home/jiawenhe/projects/weaksup-vis/log_{}.txt".format(self.device), "a") as f:
+            #     f.write("+++ target prepared\n")
 
             # bipartite matching-based loss
             losses = self.criterion(outputs, targets)
-            print("losses calculated at cuda +++++ {} +++++".format(self.device))
+
+            # with open("/home/jiawenhe/projects/weaksup-vis/log_{}.txt".format(self.device), "a") as f:
+            #     f.write("++++ loss calculated, losses: {}\n".format(losses))
 
             for k in list(losses.keys()):
                 if k in self.criterion.weight_dict:
@@ -365,17 +366,19 @@ class VideoMaskFormer(nn.Module):
                     # remove this loss if not specified in `weight_dict`
                     losses.pop(k)
 
+            # with open("/home/jiawenhe/projects/weaksup-vis/log_{}.txt".format(self.device), "a") as f:
+            #     f.write("+++++ loss updated, losses: {}\n".format(losses))
             ##### DEBUG #####
-            if self.temporal_pairwise:
-                temppair_vid = targets[0]["total_temp_pair"]
-                pos_temppair_vid = targets[0]["pos_temp_pair"]
-                for i in range(1, len(targets)):
-                    temppair_vid += targets[i]["total_temp_pair"]
-                    pos_temppair_vid += targets[i]["pos_temp_pair"]
-                losses.update(
-                    {"loss_pos_temp_pair_prop": (pos_temppair_vid / torch.clamp(temppair_vid, min=1.0)).detach()}
-                )
-            print("losses updated at cuda ----- {} -----".format(self.device))
+            # if self.temporal_pairwise:
+            #     temppair_vid = targets[0]["total_temp_pair"]
+            #     pos_temppair_vid = targets[0]["pos_temp_pair"]
+            #     for i in range(1, len(targets)):
+            #         temppair_vid += targets[i]["total_temp_pair"]
+            #         pos_temppair_vid += targets[i]["pos_temp_pair"]
+            #     losses.update(
+            #         {"loss_pos_temp_pair_prop": (pos_temppair_vid / torch.clamp(temppair_vid, min=1.0)).detach()}
+            #     )
+            # print("losses updated at cuda ----- {} -----".format(self.device))
 
             return losses
         else:
@@ -437,7 +440,6 @@ class VideoMaskFormer(nn.Module):
         # (B*T, H, W) -> (B*T, h/4, W/4) -> (B, T, H/4, W/4)
         downsampled_image_masks = org_image_masks[:, start::stride, start::stride].reshape(B, T, _h, _w)
 
-
         gt_instances = []
         for vid_ind, targets_per_video in enumerate(targets):
             _num_instance = len(targets_per_video["instances"][0])
@@ -446,13 +448,13 @@ class VideoMaskFormer(nn.Module):
             gt_boxmasks_full_per_video = torch.zeros(mask_shape, dtype=torch.float32, device=self.device)
             gt_masks_full_per_video = torch.zeros(mask_shape, dtype=torch.bool, device=self.device)
 
-            x_bound_shape = [_num_instance, T, h_pad]
-            left_bounds_full_per_video = torch.zeros(x_bound_shape, dtype=torch.float32, device=self.device)
-            right_bounds_full_per_video = torch.zeros(x_bound_shape, dtype=torch.float32, device=self.device)
-
-            y_bound_shape = [_num_instance, T, w_pad]
-            top_bounds_full_per_video = torch.zeros(y_bound_shape, dtype=torch.float32, device=self.device)
-            bottom_bounds_full_per_video = torch.zeros(y_bound_shape, dtype=torch.float32, device=self.device)
+            # x_bound_shape = [_num_instance, T, h_pad]
+            # left_bounds_full_per_video = torch.zeros(x_bound_shape, dtype=torch.float32, device=self.device)
+            # right_bounds_full_per_video = torch.zeros(x_bound_shape, dtype=torch.float32, device=self.device)
+            #
+            # y_bound_shape = [_num_instance, T, w_pad]
+            # top_bounds_full_per_video = torch.zeros(y_bound_shape, dtype=torch.float32, device=self.device)
+            # bottom_bounds_full_per_video = torch.zeros(y_bound_shape, dtype=torch.float32, device=self.device)
 
             color_similarity_shape = [_num_instance, T, self.pairwise_size * self.pairwise_size - 1, _h, _w]
             color_similarity_per_video = torch.zeros(color_similarity_shape, dtype=torch.float32, device=self.device)
@@ -488,15 +490,15 @@ class VideoMaskFormer(nn.Module):
                             ins_i, f_i, int(gt_box[1]):int(gt_box[3] + 1), int(gt_box[0]):int(gt_box[2] + 1)
                         ] = 1.0
 
-                        gt_mask = gt_boxmasks_full_per_video[ins_i, f_i].int()  # (H, W)
-                        # bounds for y projection
-                        left_bounds_full_per_video[ins_i, f_i] = torch.argmax(gt_mask, dim=1)
-                        right_bounds_full_per_video[ins_i, f_i] = gt_mask.shape[1] - \
-                                                                   torch.argmax(gt_mask.flip(1), dim=1)
-                        # bounds for x projection
-                        top_bounds_full_per_video[ins_i, f_i] = torch.argmax(gt_mask, dim=0)
-                        bottom_bounds_full_per_video[ins_i, f_i] = gt_mask.shape[0] - \
-                                                              torch.argmax(gt_mask.flip(0), dim=0)
+                        # gt_mask = gt_boxmasks_full_per_video[ins_i, f_i].int()  # (H, W)
+                        # # bounds for y projection
+                        # left_bounds_full_per_video[ins_i, f_i] = torch.argmax(gt_mask, dim=1)
+                        # right_bounds_full_per_video[ins_i, f_i] = gt_mask.shape[1] - \
+                        #                                            torch.argmax(gt_mask.flip(1), dim=1)
+                        # # bounds for x projection
+                        # top_bounds_full_per_video[ins_i, f_i] = torch.argmax(gt_mask, dim=0)
+                        # bottom_bounds_full_per_video[ins_i, f_i] = gt_mask.shape[0] - \
+                        #                                       torch.argmax(gt_mask.flip(0), dim=0)
 
                         # color similarity for individual instance at current frame
                         color_similarity_per_video[ins_i, f_i] = frame_color_similarity
@@ -504,17 +506,19 @@ class VideoMaskFormer(nn.Module):
             # (G, T, h_pad/4, w_pad/4)
             gt_boxmasks_per_video = gt_boxmasks_full_per_video[:, :, start::stride, start::stride]
             gt_masks_per_video = gt_masks_full_per_video[:, :, start::stride, start::stride]
-            left_bounds_per_video = left_bounds_full_per_video[:, :, start::stride] / stride
-            right_bounds_per_video = right_bounds_full_per_video[:, :, start::stride] / stride
-            top_bounds_per_video = top_bounds_full_per_video[:, :, start::stride] / stride
-            bottom_bounds_per_video = bottom_bounds_full_per_video[:, :, start::stride] / stride
+            # left_bounds_per_video = left_bounds_full_per_video[:, :, start::stride] / stride
+            # right_bounds_per_video = right_bounds_full_per_video[:, :, start::stride] / stride
+            # top_bounds_per_video = top_bounds_full_per_video[:, :, start::stride] / stride
+            # bottom_bounds_per_video = bottom_bounds_full_per_video[:, :, start::stride] / stride
 
             ##########################################################
             ####### find temporal matching with dino feature #########
             ##########################################################
-            num_match_per_video = torch.tensor(0, dtype=torch.float32, device=self.device)
-            num_pos_match_per_video = torch.tensor(0, dtype=torch.float32, device=self.device)
+
             if self.temporal_pairwise and org_dino_feats is not None:
+                num_match_per_video = torch.tensor(0, dtype=torch.float32, device=self.device)
+                num_pos_match_per_video = torch.tensor(0, dtype=torch.float32, device=self.device)
+
                 org_dino_feats_full_per_video = torch.cat(org_dino_feats[vid_ind], dim=0)  # (T, D, H', W')
                 dino_dim, h_org, w_org = org_dino_feats_full_per_video.shape[1:]
                 dino_feats_full_per_video = torch.zeros(
@@ -557,19 +561,19 @@ class VideoMaskFormer(nn.Module):
                             )
 
                             ##### DEBUG #####
-                            num_match_per_video += torch.tensor(
-                                coords_curr.shape[0], dtype=torch.float32, device=self.device
-                            )
-                            num_pos_match_per_video += calculate_matching_pos(
-                                coords_curr,
-                                coords_next,
-                                gt_masks_per_video[ins_i, i].float(),
-                                gt_masks_per_video[ins_i, i+1].float(),
-                            ).clone().detach()
+                            # num_match_per_video += torch.tensor(
+                            #     coords_curr.shape[0], dtype=torch.float32, device=self.device
+                            # )
+                            # num_pos_match_per_video += calculate_matching_pos(
+                            #     coords_curr,
+                            #     coords_next,
+                            #     gt_masks_per_video[ins_i, i].float(),
+                            #     gt_masks_per_video[ins_i, i+1].float(),
+                            # ).clone().detach()
 
                         else:
-                            coords_curr = torch.ones((0, 2), dtype=torch.int32).int()
-                            coords_next = torch.ones((0, 2), dtype=torch.int32).int()
+                            coords_curr = torch.ones((0, 2), dtype=torch.int32, device=self.device).int()
+                            coords_next = torch.ones((0, 2), dtype=torch.int32, device=self.device).int()
                         ins_temp_pairs.append((coords_curr, coords_next))
                     temp_pairs.append(ins_temp_pairs)
 
@@ -623,10 +627,10 @@ class VideoMaskFormer(nn.Module):
                     "labels": gt_classes_per_video, "ids": gt_ids_per_video,
                     "box_masks": gt_boxmasks_per_video[valid_idx].float(),
                     "masks": gt_masks_per_video[valid_idx].float(),
-                    "left_bounds": left_bounds_per_video[valid_idx].float(),
-                    "right_bounds": right_bounds_per_video[valid_idx].float(),
-                    "top_bounds": top_bounds_per_video[valid_idx].float(),
-                    "bottom_bounds": bottom_bounds_per_video[valid_idx].float(),
+                    # "left_bounds": left_bounds_per_video[valid_idx].float(),
+                    # "right_bounds": right_bounds_per_video[valid_idx].float(),
+                    # "top_bounds": top_bounds_per_video[valid_idx].float(),
+                    # "bottom_bounds": bottom_bounds_per_video[valid_idx].float(),
                     "color_similarities": color_similarity_per_video[valid_idx].float(),
                     "temporal_pairs": temp_pairs if self.temporal_pairwise else None,
                     "total_temp_pair": num_match_per_video if self.temporal_pairwise else None,

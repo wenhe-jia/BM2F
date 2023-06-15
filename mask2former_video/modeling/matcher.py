@@ -307,10 +307,10 @@ class VideoHungarianMatcherProjPair(nn.Module):
 
             # gt masks are already padded when preparing target
             tgt_boxmask = targets[b]["box_masks"].to(out_mask)  # (G, T, H, W), 有可能有空的mask(dummy)
-            tgt_left_bounds = targets[b]["left_bounds"].to(out_mask)  # (G, T, H)
-            tgt_right_bounds = targets[b]["right_bounds"].to(out_mask)  # (G, T, H)
-            tgt_top_bounds = targets[b]["top_bounds"].to(out_mask)  # (G, T, W)
-            tgt_bottom_bounds = targets[b]["bottom_bounds"].to(out_mask)  # (G, T, W)
+            # tgt_left_bounds = targets[b]["left_bounds"].to(out_mask)  # (G, T, H)
+            # tgt_right_bounds = targets[b]["right_bounds"].to(out_mask)  # (G, T, H)
+            # tgt_top_bounds = targets[b]["top_bounds"].to(out_mask)  # (G, T, W)
+            # tgt_bottom_bounds = targets[b]["bottom_bounds"].to(out_mask)  # (G, T, W)
             tgt_similarities = targets[b]["color_similarities"].to(out_mask)  # (G, T, k*k-1, H, W)
 
             if tgt_ids.shape[0] > 0:
@@ -435,10 +435,10 @@ class VideoHungarianMatcherProj(nn.Module):
             out_mask = outputs["pred_masks"][b]  # [num_queries, T, H_pred, W_pred]
             # gt masks are already padded when preparing target
             tgt_boxmask = targets[b]["box_masks"].to(out_mask)  # [num_gts, T, H_pred, W_pred], 有可能有空的mask(dummy)
-            tgt_left_bounds = targets[b]["left_bounds"].to(out_mask)
-            tgt_right_bounds = targets[b]["right_bounds"].to(out_mask)
-            tgt_top_bounds = targets[b]["top_bounds"].to(out_mask)
-            tgt_bottom_bounds = targets[b]["bottom_bounds"].to(out_mask)
+            # tgt_left_bounds = targets[b]["left_bounds"].to(out_mask)
+            # tgt_right_bounds = targets[b]["right_bounds"].to(out_mask)
+            # tgt_top_bounds = targets[b]["top_bounds"].to(out_mask)
+            # tgt_bottom_bounds = targets[b]["bottom_bounds"].to(out_mask)
 
             if tgt_ids.shape[0] > 0:
                 with autocast(enabled=False):

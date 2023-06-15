@@ -161,5 +161,6 @@ def add_maskformer2_config(cfg):
     cfg.WANDB.NAME = ""
     cfg.WANDB.PROJECT = "Weakly-Sup-VIS"
     cfg.WANDB.GROUP = ""
-    cfg.WANDB.RESUME = "False"
+    # cfg.WANDB.RESUME = 'None'
+    # cfg.WANDB.RESUME_ID = ''
 

@@ -108,17 +108,17 @@ def calculate_patch_matching(
         topk_match = next_feat_num
 
     # (obj_curr_h * obj_curr_w, 2)
-    # grid_coords_obj_curr = generate_grid_coords(
-    #     obj_curr_feats.shape[1], obj_curr_feats.shape[2]
-    # ).to(device=obj_curr_feats.device)  # DEBUG
-    grid_coords_obj_curr = generate_grid_coords(obj_curr_feats.shape[1], obj_curr_feats.shape[2])
+    grid_coords_obj_curr = generate_grid_coords(
+        obj_curr_feats.shape[1], obj_curr_feats.shape[2]
+    ).to(device=obj_curr_feats.device)  # DEBUG
+    # grid_coords_obj_curr = generate_grid_coords(obj_curr_feats.shape[1], obj_curr_feats.shape[2])
     grid_coords_obj_curr[:, 0] += boxes_curr_and_next[0, 0]
     grid_coords_obj_curr[:, 1] += boxes_curr_and_next[0, 1]
 
-    # grid_coords_obj_next = generate_grid_coords(
-    #     obj_next_feats.shape[1], obj_next_feats.shape[2]
-    # ).to(device=obj_curr_feats.device)  # DEBUG
-    grid_coords_obj_next = generate_grid_coords(obj_next_feats.shape[1], obj_next_feats.shape[2])
+    grid_coords_obj_next = generate_grid_coords(
+        obj_next_feats.shape[1], obj_next_feats.shape[2]
+    ).to(device=obj_curr_feats.device)  # DEBUG
+    # grid_coords_obj_next = generate_grid_coords(obj_next_feats.shape[1], obj_next_feats.shape[2])
     grid_coords_obj_next[:, 0] += boxes_curr_and_next[1, 0]
     grid_coords_obj_next[:, 1] += boxes_curr_and_next[1, 1]
 
@@ -132,8 +132,8 @@ def calculate_patch_matching(
 
     # with autocast(enabled=True):
     # mem_bef_mtrx = torch.cuda.memory_allocated()
-    # dist_mtrx = -torch.cdist(obj_curr_feats, obj_next_feats, p=2).half()  # DEBUG
-    dist_mtrx = torch.cdist(obj_curr_feats, obj_next_feats, p=2).cpu()  # (obj_curr_h * obj_curr_w, obj_next_h * obj_next_w)
+    dist_mtrx = -torch.cdist(obj_curr_feats, obj_next_feats, p=2).half()  # DEBUG
+    # dist_mtrx = torch.cdist(obj_curr_feats, obj_next_feats, p=2).cpu()  # (obj_curr_h * obj_curr_w, obj_next_h * obj_next_w)
     # mem_af_mtrx = torch.cuda.memory_allocated()
     # print("after mtrx:", (torch.cuda.memory_allocated() - mem_bef_mtrx) / 1024**2, "MB", dist_mtrx.shape, dist_mtrx.dtype)
     # match_inds = torch.argsort(dist_mtrx, dim=1)[:, :topk_match]  # (im1_fg_num, im2_fg_num)
@@ -193,7 +193,7 @@ def filter_temporal_pairs_by_color_similarity(
 
     diff = lab_pix_curr - lab_pix_next
     similarity = torch.exp(-torch.norm(diff, dim=0) * 0.5)  # (k,)
-    keep_ind = torch.where(similarity >= color_similarity_threshold)[0].cpu()
-    # keep_ind = torch.where(similarity >= color_similarity_threshold)[0]  # DEBUG
+    # keep_ind = torch.where(similarity >= color_similarity_threshold)[0].cpu()
+    keep_ind = torch.where(similarity >= color_similarity_threshold)[0]  # DEBUG
 
     return coords_curr[keep_ind], coords_next[keep_ind]
