@@ -4,6 +4,7 @@
 import copy
 import logging
 import random
+import json
 import numpy as np
 from typing import List, Union
 import torch
@@ -21,7 +22,7 @@ from detectron2.data import transforms as T
 
 from .augmentation import build_augmentation
 
-__all__ = ["YTVISDatasetMapper", "CocoClipDatasetMapper"]
+__all__ = ["YTVISDatasetMapperWithCoords", "YTVISDatasetMapper", "CocoClipDatasetMapper"]
 
 
 def filter_empty_instances(instances, by_box=True, by_mask=True, box_threshold=1e-5):
@@ -111,6 +112,278 @@ def ytvis_annotations_to_instances(annos, image_size):
     return target
 
 
+class YTVISDatasetMapperWithCoords:
+    """
+    A callable which takes a dataset dict in YouTube-VIS Dataset format,
+    and map it into a format used by the model.
+    """
+
+    @configurable
+    def __init__(
+        self,
+        is_train: bool,
+        *,
+        augmentations: List[Union[T.Augmentation, T.Transform]],
+        image_format: str,
+        use_instance_mask: bool = False,
+        sampling_frame_num: int = 2,
+        sampling_frame_range: int = 5,
+        sampling_frame_shuffle: bool = False,
+        num_classes: int = 40,
+    ):
+        """
+        NOTE: this interface is experimental.
+        Args:
+            is_train: whether it's used in training or inference
+            augmentations: a list of augmentations or deterministic transforms to apply
+            image_format: an image format supported by :func:`detection_utils.read_image`.
+            use_instance_mask: whether to process instance segmentation annotations, if available
+        """
+        # fmt: off
+        self.is_train               = is_train
+        self.augmentations          = T.AugmentationList(augmentations)
+        self.image_format           = image_format
+        self.use_instance_mask      = use_instance_mask
+        self.sampling_frame_num     = sampling_frame_num
+        self.sampling_frame_range   = sampling_frame_range
+        self.sampling_frame_shuffle = sampling_frame_shuffle
+        self.num_classes            = num_classes
+        # fmt: on
+        logger = logging.getLogger(__name__)
+        mode = "training" if is_train else "inference"
+        logger.info(f"[DatasetMapper] Augmentations used in {mode}: {augmentations}")
+
+    @classmethod
+    def from_config(cls, cfg, is_train: bool = True):
+        augs = build_augmentation(cfg, is_train)
+
+        sampling_frame_num = cfg.INPUT.SAMPLING_FRAME_NUM
+        sampling_frame_range = cfg.INPUT.SAMPLING_FRAME_RANGE
+        sampling_frame_shuffle = cfg.INPUT.SAMPLING_FRAME_SHUFFLE
+
+        ret = {
+            "is_train": is_train,
+            "augmentations": augs,
+            "image_format": cfg.INPUT.FORMAT,
+            "use_instance_mask": cfg.MODEL.MASK_ON,
+            "sampling_frame_num": sampling_frame_num,
+            "sampling_frame_range": sampling_frame_range,
+            "sampling_frame_shuffle": sampling_frame_shuffle,
+            "num_classes": cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES,
+        }
+
+        return ret
+
+    def __call__(self, dataset_dict):
+        """
+        Args:
+            dataset_dict (dict): Metadata of one video, in YTVIS Dataset format.
+
+        Returns:
+            dict: a format that builtin models in detectron2 accept
+        """
+        # TODO consider examining below deepcopy as it costs huge amount of computations.
+        dataset_dict = copy.deepcopy(dataset_dict)  # it will be modified by code below
+
+        video_length = dataset_dict["length"]
+        if self.is_train:
+
+            # frame2, fix interval sampling
+            if 0 < video_length <= 10:
+                interval = 4
+            elif 10 < video_length <= 20:
+                interval = 10
+            elif 20 < video_length <= 30:
+                interval = 15
+            elif 30 < video_length <= 40:
+                interval = 20
+            elif 40 < video_length:
+                interval = 36
+            else:
+                raise ValueError("video length is not valid")
+
+            ref_frame = random.randrange(video_length - interval)
+            tgt_frame = ref_frame + interval
+            selected_idx = [ref_frame, tgt_frame]
+
+            # random adaptive sampling
+            # ref_frame = random.randrange(video_length)
+            #
+            # start_idx = max(0, ref_frame-self.sampling_frame_range)
+            # end_idx = min(video_length, ref_frame+self.sampling_frame_range + 1)
+            #
+            # selected_idx = np.random.choice(
+            #     np.array(list(range(start_idx, ref_frame)) + list(range(ref_frame+1, end_idx))),
+            #     self.sampling_frame_num - 1,
+            # )
+            # selected_idx = selected_idx.tolist() + [ref_frame]
+            # selected_idx = sorted(selected_idx)
+            # if self.sampling_frame_shuffle:
+            #     random.shuffle(selected_idx)
+        else:
+            selected_idx = range(video_length)
+
+        video_annos = dataset_dict.pop("annotations", None)
+        file_names = dataset_dict.pop("file_names", None)
+
+        if self.is_train:
+            _ids = set()
+            for frame_idx in selected_idx:
+                _ids.update([anno["id"] for anno in video_annos[frame_idx]])
+            ids = dict()
+            for i, _id in enumerate(_ids):
+                ids[_id] = i
+            # ids: {dataset_ins_id: video_ins_id}
+            # print(ids)
+
+            ##### load matching coordinates from json file #####
+            match_coords_video = {}
+            for gt_id, _id in ids.items():
+                match_coords_video.update(
+                    {
+                        gt_id: [
+                            {
+                                "curr_pts": torch.zeros((0, 2), dtype=torch.int16),
+                                "next_pts": torch.zeros((0, 2), dtype=torch.int16),
+                            } for _ in range(self.sampling_frame_num - 1)
+                        ]
+                    }
+                )
+            dataset_dict['match_coords'] = match_coords_video
+
+
+        dataset_dict["image"] = []
+        dataset_dict["instances"] = []
+        dataset_dict["file_names"] = []
+        for f_i, frame_idx in enumerate(selected_idx):
+            dataset_dict["file_names"].append(file_names[frame_idx])
+
+            # Read image
+            image = utils.read_image(file_names[frame_idx], format=self.image_format)
+            utils.check_image_size(dataset_dict, image)
+
+            aug_input = T.AugInput(image)
+            transforms = self.augmentations(aug_input)
+            image = aug_input.image
+
+            image_shape = image.shape[:2]  # h, w
+            # Pytorch's dataloader is efficient on torch.Tensor due to shared-memory,
+            # but not efficient on large generic data structures due to the use of pickle & mp.Queue.
+            # Therefore it's important to use torch.Tensor.
+            dataset_dict["image"].append(torch.as_tensor(np.ascontiguousarray(image.transpose(2, 0, 1))))
+
+            if (video_annos is None) or (not self.is_train):
+                continue
+
+            # NOTE copy() is to prevent annotations getting changed from applying augmentations
+            _frame_annos = []  # single frame annotations
+            for anno in video_annos[frame_idx]:
+                _anno = {}
+                for k, v in anno.items():
+                    _anno[k] = copy.deepcopy(v)
+                _frame_annos.append(_anno)
+
+            # USER: Implement additional transformations if you have other types of data
+            annos = [
+                utils.transform_instance_annotations(obj, transforms, image_shape)
+                for obj in _frame_annos
+                if obj.get("iscrowd", 0) == 0
+            ]
+            # 先为每个instance生成一个dummy obj
+            sorted_annos = [_get_dummy_anno(self.num_classes) for _ in range(len(ids))]
+
+            for _anno in annos:
+                idx = ids[_anno["id"]]  # 这个 video 有这个实例，但是在这一帧不一定有，没有就是 dummy obj
+                sorted_annos[idx] = _anno
+            _gt_ids = [_anno["id"] for _anno in sorted_annos]
+            # print("frame {} ids:".format(f_i), _gt_ids)
+
+
+            # check whether horizontal flip is applied
+            do_hflip = sum(isinstance(t, T.HFlipTransform) for t in transforms.transforms) % 2 == 1
+            # print("video_length: ", video_length, " | selected_idx: ", selected_idx)
+            if f_i < len(selected_idx) - 1:
+                matching_file_name = file_names[frame_idx].replace(
+                    "JPEGImages", "matching_coords_vitg_top2_frame2"
+                ).replace(
+                    "{}.jpg".format(file_names[frame_idx].split("/")[-1].split(".")[0]),
+                    "frame_{}_{}.json".format(
+                        file_names[frame_idx].split("/")[-1].split(".")[0],
+                        file_names[selected_idx[f_i + 1]].split("/")[-1].split(".")[0],
+                    )
+                )
+
+                with open(matching_file_name, "r") as f:
+                    matching_info = json.load(f)
+                    assert matching_info["interval"] == interval
+
+                    if matching_info["tfmd_size"] is not None:
+                        # calculate scale factor
+                        org_shape = (matching_info["tfmd_size"][0], matching_info["tfmd_size"][1])
+                        scale_factor = image_shape[0] / org_shape[0]
+
+                        ins_matches = matching_info["matching"]
+                        match_ins_ids = []
+                        for i, ins_match in enumerate(ins_matches):
+                            for _id, _match_coords in ins_match.items():
+                                match_ins_ids.append(int(_id))
+                        assert len(ins_matches) <= len(_gt_ids), "{} | {}".format(match_ins_ids, _gt_ids)
+
+                        # create dummy matching coordinates for each instance (current frame)
+                        # match_coords_frame = {}
+                        # for _gt_id in _gt_ids:
+                        #     match_coords_frame[_gt_id] = {
+                        #         "curr_pts": torch.zeros((0, 2), dtype=torch.int16),
+                        #         "next_pts": torch.zeros((0, 2), dtype=torch.int16),
+                        #     }
+
+                        # 当前两帧中所有实例的匹配关系，每个实例的匹配关系是一个dict，包含id和coords，
+                        # 每个实例的匹配关系是一个dict，包含curr_pts和next_pts
+                        for i, ins_match in enumerate(ins_matches):
+                            for _id, _match_coords in ins_match.items():
+                                _id = int(_id)
+                                assert _id in _gt_ids
+
+                                # grab the matching coordinates
+                                curr_pts_ins = torch.as_tensor(
+                                    np.ascontiguousarray(np.array(_match_coords["curr_pts"]) * scale_factor)
+                                )
+                                next_pts_ins = torch.as_tensor(
+                                    np.ascontiguousarray(np.array(_match_coords["next_pts"]) * scale_factor)
+                                )
+
+                                assert curr_pts_ins.shape == next_pts_ins.shape
+
+                                if do_hflip:
+                                    curr_pts_ins[:, 0] = image_shape[1] - (curr_pts_ins[:, 0] + 1)
+                                    next_pts_ins[:, 0] = image_shape[1] - (next_pts_ins[:, 0] + 1)
+
+                                curr_pts_ins *= 0.25
+                                next_pts_ins *= 0.25
+
+                                dataset_dict['match_coords'][_id][f_i]["curr_pts"] = curr_pts_ins.ceil().to(
+                                    dtype=torch.int16
+                                )
+                                dataset_dict['match_coords'][_id][f_i]["next_pts"] = next_pts_ins.ceil().to(
+                                    dtype=torch.int16
+                                )
+
+
+            instances = utils.annotations_to_instances(sorted_annos, image_shape, mask_format="bitmask")
+            instances.gt_ids = torch.tensor(_gt_ids)
+            if instances.has("gt_masks"):
+                instances.gt_boxes = instances.gt_masks.get_bounding_boxes()
+                instances = filter_empty_instances(instances)
+            else:
+                # 在选的两帧上都没有object，所有的sorted_annos, ids, _frame_annos都是空的
+                instances.gt_masks = BitMasks(torch.empty((0, *image_shape)))  # tensor([]), shape in (0, h, w)
+                instances.gt_boxes = instances.gt_masks.get_bounding_boxes()  # tensor([]), shape in (0, 4)
+
+            dataset_dict["instances"].append(instances)
+
+        return dataset_dict
+
+
 class YTVISDatasetMapper:
     """
     A callable which takes a dataset dict in YouTube-VIS Dataset format,
@@ -186,19 +459,63 @@ class YTVISDatasetMapper:
 
         video_length = dataset_dict["length"]
         if self.is_train:
-            ref_frame = random.randrange(video_length)
 
-            start_idx = max(0, ref_frame-self.sampling_frame_range)
-            end_idx = min(video_length, ref_frame+self.sampling_frame_range + 1)
+            # frame2, fix interval sampling
+            if 0 < video_length <= 10:
+                interval = 4
+            elif 10 < video_length <= 20:
+                interval = 10
+            elif 20 < video_length <= 30:
+                interval = 15
+            elif 30 < video_length <= 40:
+                interval = 20
+            elif 40 < video_length:
+                interval = 36
+            else:
+                raise ValueError("video length is not valid")
 
-            selected_idx = np.random.choice(
-                np.array(list(range(start_idx, ref_frame)) + list(range(ref_frame+1, end_idx))),
-                self.sampling_frame_num - 1,
-            )
-            selected_idx = selected_idx.tolist() + [ref_frame]
-            selected_idx = sorted(selected_idx)
-            if self.sampling_frame_shuffle:
-                random.shuffle(selected_idx)
+            ref_frame = random.randrange(video_length - interval)
+            tgt_frame = ref_frame + interval
+            selected_idx = [ref_frame, tgt_frame]
+
+            # frame 3, fix interval sampling
+            # if 0 < video_length <= 8:
+            #     interval = 2
+            # elif 8 < video_length <= 16:
+            #     interval = 3
+            # elif 16 < video_length <= 24:
+            #     interval = 7
+            # elif 24 < video_length <= 32:
+            #     interval = 10
+            # elif 32 < video_length <= 40:
+            #     interval = 14
+            # elif 40 < video_length <= 48:
+            #     interval = 18
+            # elif 48 < video_length:
+            #     interval = 23
+            # else:
+            #     raise ValueError("video length is not valid")
+            #
+            # ref_frame = random.randrange(video_length - 2 * interval)
+            # first_tgt_frame = ref_frame + interval
+            # second_tgt_frame = first_tgt_frame + interval
+            # selected_idx = [ref_frame, first_tgt_frame, second_tgt_frame]
+
+
+            # random adaptive sampling
+            # ref_frame = random.randrange(video_length)
+            #
+            # start_idx = max(0, ref_frame-self.sampling_frame_range)
+            # end_idx = min(video_length, ref_frame+self.sampling_frame_range + 1)
+            #
+            # selected_idx = np.random.choice(
+            #     np.array(list(range(start_idx, ref_frame)) + list(range(ref_frame+1, end_idx))),
+            #     self.sampling_frame_num - 1,
+            # )
+            # selected_idx = selected_idx.tolist() + [ref_frame]
+            # selected_idx = sorted(selected_idx)
+            # if self.sampling_frame_shuffle:
+            #     random.shuffle(selected_idx)
         else:
             selected_idx = range(video_length)
 

@@ -34,9 +34,9 @@ _PREDEFINED_SPLITS_YTVIS_2021 = {
 # ==== Predefined splits for YTVIS 2021 ===========
 _PREDEFINED_SPLITS_YTVIS_2021_MINI = {
     "ytvis_2021_train_mini": ("ytvis_2021_mini/train/JPEGImages",
-                         "ytvis_2021_mini/annotations/instances_train_sub.json"),
+                              "ytvis_2021_mini/train_mini.json"),
     "ytvis_2021_val_mini": ("ytvis_2021_mini/train/JPEGImages",
-                       "ytvis_2021_mini/annotations/instances_val_sub.json"),
+                            "ytvis_2021_mini/valid_mini.json"),
 }
 
 

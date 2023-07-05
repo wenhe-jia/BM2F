@@ -9,4 +9,10 @@ def add_maskformer2_video_config(cfg):
     cfg.INPUT.SAMPLING_FRAME_NUM = 2
     cfg.INPUT.SAMPLING_FRAME_RANGE = 20
     cfg.INPUT.SAMPLING_FRAME_SHUFFLE = False
-    cfg.INPUT.AUGMENTATIONS = [] # "brightness", "contrast", "saturation", "rotation"
+    cfg.INPUT.AUGMENTATIONS = []  # "brightness", "contrast", "saturation", "rotation"
+
+    cfg.MODEL.MASK_FORMER_VIDEO = CN()
+    cfg.MODEL.MASK_FORMER_VIDEO.WEAK_SUPERVISION = CN()
+    cfg.MODEL.MASK_FORMER_VIDEO.WEAK_SUPERVISION.TEMPORAL_PAIRWISE_WEIGHT = 2.0
+    cfg.MODEL.MASK_FORMER_VIDEO.WEAK_SUPERVISION.WARM_UP = False
+
