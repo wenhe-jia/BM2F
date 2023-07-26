@@ -295,6 +295,7 @@ class VideoSetCriterionProjSTPair(nn.Module):
             pairwise_color_thresh,
             pairwise_warmup_iters,
             temporal_warmup,
+            use_input_resolution_for_temp,
             losses,
     ):
         """Create the criterion.
@@ -323,6 +324,7 @@ class VideoSetCriterionProjSTPair(nn.Module):
         self.register_buffer("_iter", torch.zeros([1]))
 
         self.temporal_warmup = temporal_warmup
+        self.use_input_resolution_for_temp = use_input_resolution_for_temp
 
     def loss_labels(self, outputs, targets, indices, num_masks):
         """Classification loss (NLL)
@@ -484,6 +486,15 @@ class VideoSetCriterionProjSTPair(nn.Module):
         src_masks = outputs["pred_masks"]
         src_masks = src_masks[src_idx]  # (N, T, H, W)
 
+        if self.use_input_resolution_for_temp:
+            padded_input_h = targets[0]["padded_input_height"]
+            padded_input_w = targets[0]["padded_input_width"]
+            src_masks = F.interpolate(
+                src_masks,
+                size=(padded_input_h, padded_input_w),
+                mode='bilinear', align_corners=False
+            )
+
         target_pairs = []
         for batch_ind, target in enumerate(targets):
             tgt_pairs_src = target['temporal_pairs']
@@ -492,21 +503,48 @@ class VideoSetCriterionProjSTPair(nn.Module):
                 target_pairs.append(tgt_pairs_src[tgt_i])
 
         del targets
-        # target_pairs = [t['temporal_pairs'][i] for t, (_, i) in zip(targets, indices)]  # [[((k, 2), (k, 2))] * T-1] * G
 
         if src_idx[0].shape[0] > 0:
-            target_similarities = []
+            # _temppair_losses = []
+            # for ins_i in range(src_masks.shape[0]):
+            #     ins_pairs_cross_frames = target_pairs[ins_i]  # [((k, 2), (k, 2))] * T-1
+            #
+            #     ins_src_similarities = []
+            #     for t_i, pairs in enumerate(ins_pairs_cross_frames):
+            #         pts_curr = pairs[0]
+            #         pts_next = pairs[1]
+            #
+            #         pts_curr[:, 0] = pts_curr[:, 0].clamp(0, src_masks.shape[3] - 1)
+            #         pts_curr[:, 1] = pts_curr[:, 1].clamp(0, src_masks.shape[2] - 1)
+            #         pts_next[:, 0] = pts_next[:, 0].clamp(0, src_masks.shape[3] - 1)
+            #         pts_next[:, 1] = pts_next[:, 1].clamp(0, src_masks.shape[2] - 1)
+            #
+            #         ins_src_similarities.append(
+            #             calculate_temp_similarities(
+            #                 src_masks[ins_i, t_i, :, :],
+            #                 src_masks[ins_i, t_i + 1, :, :],
+            #                 pts_curr.long(),
+            #                 pts_next.long(),
+            #             )
+            #         )
+            #
+            #     ins_src_similarities = torch.cat(ins_src_similarities, dim=0)
+            #     if ins_src_similarities.shape[0] > 0:
+            #         _temppair_losses.append(ins_src_similarities.mean())
+            #
+            # temppair_loss = sum(_temppair_losses) / max(len(_temppair_losses), 1) if len(_temppair_losses) > 0 \
+            #     else src_masks.new_zero(1)
+            #
+            # warmup_factor = min(self._iter.item() / float(self.pairwise_warmup_iters), 1.0)
+            # losses = {
+            #     "loss_mask_temporal_pairwise":
+            #         temppair_loss * warmup_factor if self.temporal_warmup else temppair_loss
+            # }
+
+
             src_similarities = []
             for ins_i in range(src_masks.shape[0]):
                 ins_pairs_cross_frames = target_pairs[ins_i]  # [((k, 2), (k, 2))] * T-1
-
-                with torch.no_grad():
-                    ins_temp_pair_num = torch.tensor(
-                        [_[0].shape[0] for _ in ins_pairs_cross_frames], dtype=torch.int64, device=src_masks.device
-                    ).sum()  # (T-1,) -> (1,)
-                    ins_target_similarities = torch.ones(
-                        ins_temp_pair_num, dtype=torch.float32, device=src_masks.device
-                    )
 
                 ins_src_similarities = []
                 for t_i, pairs in enumerate(ins_pairs_cross_frames):
@@ -518,7 +556,6 @@ class VideoSetCriterionProjSTPair(nn.Module):
                     pts_next[:, 0] = pts_next[:, 0].clamp(0, src_masks.shape[3] - 1)
                     pts_next[:, 1] = pts_next[:, 1].clamp(0, src_masks.shape[2] - 1)
 
-                    # try:
                     ins_src_similarities.append(
                         calculate_temp_similarities(
                             src_masks[ins_i, t_i, :, :],
@@ -527,33 +564,24 @@ class VideoSetCriterionProjSTPair(nn.Module):
                             pts_next.long(),
                         )
                     )
-                    # except:
-                    #     print('\n~loss : ', src_masks[ins_i, t_i, :, :].device, src_masks[ins_i, t_i, :, :].shape)
-                    #     print('~~loss curr: ', pts_curr.device, pts_curr.shape, pts_curr.dtype)
-                    #     print('~~loss next: ', pts_next.device, pts_next.shape, pts_next.dtype)
-                    #     print('~~~loss curr: ', pts_curr)
-                    #     print('~~~loss next: ', pts_next)
 
                 ins_src_similarities = torch.cat(ins_src_similarities, dim=0)
-
-                assert ins_src_similarities.shape == ins_target_similarities.shape
-
-                target_similarities.append(ins_target_similarities)
                 src_similarities.append(ins_src_similarities)
 
-            target_similarities = torch.cat(target_similarities, dim=0)
             src_similarities = torch.cat(src_similarities, dim=0)
-            assert target_similarities.shape == src_similarities.shape
 
             warmup_factor = min(self._iter.item() / float(self.pairwise_warmup_iters), 1.0)
+            if src_similarities.shape[0] > 0:
+                temppair_loss = src_similarities.mean(dim=0)
+            else:
+                temppair_loss = torch.tensor([0], dtype=torch.float32, device=src_masks.device)
+
             losses = {
                 "loss_mask_temporal_pairwise":
-                    temporal_pairwise_loss_jit(src_similarities, target_similarities) * warmup_factor
-                    if self.temporal_warmup else temporal_pairwise_loss_jit(src_similarities, target_similarities)
+                    temppair_loss * warmup_factor if self.temporal_warmup else temppair_loss
             }
 
             del src_similarities
-            del target_similarities
         else:
             losses = {"loss_mask_temporal_pairwise": torch.tensor([0], dtype=torch.float32, device=src_masks.device)}
 

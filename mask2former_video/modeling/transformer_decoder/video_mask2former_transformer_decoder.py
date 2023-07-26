@@ -398,11 +398,14 @@ class VideoMultiScaleMaskedTransformerDecoder(nn.Module):
 
         predictions_class = []
         predictions_mask = []
+        predictions_embds = []
+
 
         # prediction heads on learnable query features
         outputs_class, outputs_mask, attn_mask = self.forward_prediction_heads(output, mask_features, attn_mask_target_size=size_list[0])
         predictions_class.append(outputs_class)
         predictions_mask.append(outputs_mask)
+        predictions_embds.append(output)
 
         for i in range(self.num_layers):
             level_index = i % self.num_feature_levels
@@ -429,15 +432,19 @@ class VideoMultiScaleMaskedTransformerDecoder(nn.Module):
             outputs_class, outputs_mask, attn_mask = self.forward_prediction_heads(output, mask_features, attn_mask_target_size=size_list[(i + 1) % self.num_feature_levels])
             predictions_class.append(outputs_class)
             predictions_mask.append(outputs_mask)
+            predictions_embds.append(output)
 
         assert len(predictions_class) == self.num_layers + 1
+
+        pred_embds = self.decoder_norm(predictions_embds[-1].transpose(0, 1))  # q, b, c -> b, q, c
 
         out = {
             'pred_logits': predictions_class[-1],
             'pred_masks': predictions_mask[-1],
             'aux_outputs': self._set_aux_loss(
                 predictions_class if self.mask_classification else None, predictions_mask
-            )
+            ),
+            'pred_embds': pred_embds,
         }
         return out
 

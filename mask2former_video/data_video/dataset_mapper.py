@@ -130,6 +130,10 @@ class YTVISDatasetMapperWithCoords:
         sampling_frame_range: int = 5,
         sampling_frame_shuffle: bool = False,
         num_classes: int = 40,
+        temporal_topk: int = 1,
+        temp_dist_thr: float = 0.9,
+        use_input_resolution_for_temp: bool = False,
+        fixed_sampling_interval: bool = False,
     ):
         """
         NOTE: this interface is experimental.
@@ -148,6 +152,16 @@ class YTVISDatasetMapperWithCoords:
         self.sampling_frame_range   = sampling_frame_range
         self.sampling_frame_shuffle = sampling_frame_shuffle
         self.num_classes            = num_classes
+
+        self.temporal_topk                 = temporal_topk
+        self.temp_dist_thr                 = temp_dist_thr
+        self.use_input_resolution_for_temp = use_input_resolution_for_temp
+        self.fixed_sampling_interval       = fixed_sampling_interval
+        self.matching_file_path            = "matching_coords_vitg_corr_top{}_frame{}".format(
+            temporal_topk, sampling_frame_num
+        )
+        assert self.temporal_topk >= 1
+
         # fmt: on
         logger = logging.getLogger(__name__)
         mode = "training" if is_train else "inference"
@@ -170,6 +184,10 @@ class YTVISDatasetMapperWithCoords:
             "sampling_frame_range": sampling_frame_range,
             "sampling_frame_shuffle": sampling_frame_shuffle,
             "num_classes": cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES,
+            "temporal_topk": cfg.MODEL.MASK_FORMER_VIDEO.WEAK_SUPERVISION.TEMPORAL_TOPK,
+            "temp_dist_thr": cfg.MODEL.MASK_FORMER_VIDEO.WEAK_SUPERVISION.TEMPORAL_DIST_THRESH,
+            "use_input_resolution_for_temp": cfg.MODEL.MASK_FORMER_VIDEO.WEAK_SUPERVISION.USE_INPUT_RESOLUTION,
+            "fixed_sampling_interval": cfg.INPUT.FIXED_SAMPLING_INTERVAL,
         }
 
         return ret
@@ -188,38 +206,67 @@ class YTVISDatasetMapperWithCoords:
         video_length = dataset_dict["length"]
         if self.is_train:
 
-            # frame2, fix interval sampling
-            if 0 < video_length <= 10:
-                interval = 4
-            elif 10 < video_length <= 20:
-                interval = 10
-            elif 20 < video_length <= 30:
-                interval = 15
-            elif 30 < video_length <= 40:
-                interval = 20
-            elif 40 < video_length:
-                interval = 36
+            if self.fixed_sampling_interval:
+                # frame2, fix interval sampling
+                if self.sampling_frame_num == 2:
+                    if 0 < video_length <= 10:
+                        interval = 4
+                    elif 10 < video_length <= 20:
+                        interval = 10
+                    elif 20 < video_length <= 30:
+                        interval = 15
+                    elif 30 < video_length <= 40:
+                        interval = 20
+                    elif 40 < video_length:
+                        interval = 36
+                    else:
+                        raise ValueError("video length is not valid")
+
+                    ref_frame = random.randrange(video_length - interval)
+                    tgt_frame = ref_frame + interval
+                    selected_idx = [ref_frame, tgt_frame]
+
+                # frame 3, fix interval sampling
+                elif self.sampling_frame_num == 3:
+                    if 0 < video_length <= 8:
+                        interval = 2
+                    elif 8 < video_length <= 16:
+                        interval = 3
+                    elif 16 < video_length <= 24:
+                        interval = 7
+                    elif 24 < video_length <= 32:
+                        interval = 10
+                    elif 32 < video_length <= 40:
+                        interval = 14
+                    elif 40 < video_length <= 48:
+                        interval = 18
+                    elif 48 < video_length:
+                        interval = 23
+                    else:
+                        raise ValueError("video length is not valid")
+
+                    ref_frame = random.randrange(video_length - 2 * interval)
+                    first_tgt_frame = ref_frame + interval
+                    second_tgt_frame = first_tgt_frame + interval
+                    selected_idx = [ref_frame, first_tgt_frame, second_tgt_frame]
+
+                else:
+                    raise NotImplementedError
             else:
-                raise ValueError("video length is not valid")
+                # random adaptive sampling
+                ref_frame = random.randrange(video_length)
 
-            ref_frame = random.randrange(video_length - interval)
-            tgt_frame = ref_frame + interval
-            selected_idx = [ref_frame, tgt_frame]
+                start_idx = max(0, ref_frame-self.sampling_frame_range)
+                end_idx = min(video_length, ref_frame+self.sampling_frame_range + 1)
 
-            # random adaptive sampling
-            # ref_frame = random.randrange(video_length)
-            #
-            # start_idx = max(0, ref_frame-self.sampling_frame_range)
-            # end_idx = min(video_length, ref_frame+self.sampling_frame_range + 1)
-            #
-            # selected_idx = np.random.choice(
-            #     np.array(list(range(start_idx, ref_frame)) + list(range(ref_frame+1, end_idx))),
-            #     self.sampling_frame_num - 1,
-            # )
-            # selected_idx = selected_idx.tolist() + [ref_frame]
-            # selected_idx = sorted(selected_idx)
-            # if self.sampling_frame_shuffle:
-            #     random.shuffle(selected_idx)
+                selected_idx = np.random.choice(
+                    np.array(list(range(start_idx, ref_frame)) + list(range(ref_frame+1, end_idx))),
+                    self.sampling_frame_num - 1,
+                )
+                selected_idx = selected_idx.tolist() + [ref_frame]
+                selected_idx = sorted(selected_idx)
+                if self.sampling_frame_shuffle:
+                    random.shuffle(selected_idx)
         else:
             selected_idx = range(video_length)
 
@@ -296,15 +343,12 @@ class YTVISDatasetMapperWithCoords:
                 idx = ids[_anno["id"]]  # 这个 video 有这个实例，但是在这一帧不一定有，没有就是 dummy obj
                 sorted_annos[idx] = _anno
             _gt_ids = [_anno["id"] for _anno in sorted_annos]
-            # print("frame {} ids:".format(f_i), _gt_ids)
-
 
             # check whether horizontal flip is applied
             do_hflip = sum(isinstance(t, T.HFlipTransform) for t in transforms.transforms) % 2 == 1
-            # print("video_length: ", video_length, " | selected_idx: ", selected_idx)
             if f_i < len(selected_idx) - 1:
                 matching_file_name = file_names[frame_idx].replace(
-                    "JPEGImages", "matching_coords_vitg_top2_frame2"
+                    "JPEGImages", self.matching_file_path
                 ).replace(
                     "{}.jpg".format(file_names[frame_idx].split("/")[-1].split(".")[0]),
                     "frame_{}_{}.json".format(
@@ -329,14 +373,6 @@ class YTVISDatasetMapperWithCoords:
                                 match_ins_ids.append(int(_id))
                         assert len(ins_matches) <= len(_gt_ids), "{} | {}".format(match_ins_ids, _gt_ids)
 
-                        # create dummy matching coordinates for each instance (current frame)
-                        # match_coords_frame = {}
-                        # for _gt_id in _gt_ids:
-                        #     match_coords_frame[_gt_id] = {
-                        #         "curr_pts": torch.zeros((0, 2), dtype=torch.int16),
-                        #         "next_pts": torch.zeros((0, 2), dtype=torch.int16),
-                        #     }
-
                         # 当前两帧中所有实例的匹配关系，每个实例的匹配关系是一个dict，包含id和coords，
                         # 每个实例的匹配关系是一个dict，包含curr_pts和next_pts
                         for i, ins_match in enumerate(ins_matches):
@@ -344,30 +380,58 @@ class YTVISDatasetMapperWithCoords:
                                 _id = int(_id)
                                 assert _id in _gt_ids
 
-                                # grab the matching coordinates
+
+                                # grab the matching coordinates and apply transform
                                 curr_pts_ins = torch.as_tensor(
                                     np.ascontiguousarray(np.array(_match_coords["curr_pts"]) * scale_factor)
                                 )
                                 next_pts_ins = torch.as_tensor(
                                     np.ascontiguousarray(np.array(_match_coords["next_pts"]) * scale_factor)
                                 )
-
+                                corrs = torch.as_tensor(
+                                    np.ascontiguousarray(np.array(_match_coords["corr"]))
+                                )
                                 assert curr_pts_ins.shape == next_pts_ins.shape
 
                                 if do_hflip:
                                     curr_pts_ins[:, 0] = image_shape[1] - (curr_pts_ins[:, 0] + 1)
                                     next_pts_ins[:, 0] = image_shape[1] - (next_pts_ins[:, 0] + 1)
 
-                                curr_pts_ins *= 0.25
-                                next_pts_ins *= 0.25
+                                if not self.use_input_resolution_for_temp:
+                                    curr_pts_ins *= 0.25
+                                    next_pts_ins *= 0.25
 
-                                dataset_dict['match_coords'][_id][f_i]["curr_pts"] = curr_pts_ins.ceil().to(
+                                # 选取topk个点
+                                saved_topk = _match_coords["topk"]
+                                assert curr_pts_ins.shape[0] % saved_topk == 0
+                                pt_num = int(curr_pts_ins.shape[0] / saved_topk)
+
+                                curr_pts_ins = curr_pts_ins.reshape((pt_num, saved_topk, 2))
+                                next_pts_ins = next_pts_ins.reshape((pt_num, saved_topk, 2))
+                                coors = corrs.reshape((pt_num, saved_topk))
+
+                                if saved_topk > self.temporal_topk:
+                                    keep_num = self.temporal_topk
+                                else:
+                                    keep_num = saved_topk
+
+                                _curr_pts_ins = curr_pts_ins[:, :keep_num, :].flatten(0, 1)
+                                _next_pts_ins = next_pts_ins[:, :keep_num, :].flatten(0, 1)
+                                _coors = coors[:, :keep_num].flatten(0, 1)
+
+                                # filter matching by correlations
+                                keep_inds = torch.where(corrs < self.temp_dist_thr)[0]
+                                # print('\n keep proportion: ', keep_inds.shape[0] / (corrs.shape[0] + 1))
+
+                                _curr_pts_ins = _curr_pts_ins[keep_inds]
+                                _next_pts_ins = _next_pts_ins[keep_inds]
+
+                                dataset_dict['match_coords'][_id][f_i]["curr_pts"] = _curr_pts_ins.ceil().to(
                                     dtype=torch.int16
                                 )
-                                dataset_dict['match_coords'][_id][f_i]["next_pts"] = next_pts_ins.ceil().to(
+                                dataset_dict['match_coords'][_id][f_i]["next_pts"] = _next_pts_ins.ceil().to(
                                     dtype=torch.int16
                                 )
-
 
             instances = utils.annotations_to_instances(sorted_annos, image_shape, mask_format="bitmask")
             instances.gt_ids = torch.tensor(_gt_ids)
@@ -461,45 +525,49 @@ class YTVISDatasetMapper:
         if self.is_train:
 
             # frame2, fix interval sampling
-            if 0 < video_length <= 10:
-                interval = 4
-            elif 10 < video_length <= 20:
-                interval = 10
-            elif 20 < video_length <= 30:
-                interval = 15
-            elif 30 < video_length <= 40:
-                interval = 20
-            elif 40 < video_length:
-                interval = 36
-            else:
-                raise ValueError("video length is not valid")
-
-            ref_frame = random.randrange(video_length - interval)
-            tgt_frame = ref_frame + interval
-            selected_idx = [ref_frame, tgt_frame]
-
-            # frame 3, fix interval sampling
-            # if 0 < video_length <= 8:
-            #     interval = 2
-            # elif 8 < video_length <= 16:
-            #     interval = 3
-            # elif 16 < video_length <= 24:
-            #     interval = 7
-            # elif 24 < video_length <= 32:
+            # if 0 < video_length <= 10:
+            #     interval = 4
+            # elif 10 < video_length <= 20:
             #     interval = 10
-            # elif 32 < video_length <= 40:
-            #     interval = 14
-            # elif 40 < video_length <= 48:
-            #     interval = 18
-            # elif 48 < video_length:
-            #     interval = 23
+            # elif 20 < video_length <= 30:
+            #     interval = 15
+            # elif 30 < video_length <= 40:
+            #     interval = 20
+            # elif 40 < video_length:
+            #     interval = 36
             # else:
             #     raise ValueError("video length is not valid")
             #
-            # ref_frame = random.randrange(video_length - 2 * interval)
-            # first_tgt_frame = ref_frame + interval
-            # second_tgt_frame = first_tgt_frame + interval
-            # selected_idx = [ref_frame, first_tgt_frame, second_tgt_frame]
+            # ref_frame = random.randrange(video_length - interval)
+            # tgt_frame = ref_frame + interval
+            # selected_idx = [ref_frame, tgt_frame]
+
+            # frame 3, fix interval sampling
+            if 0 < video_length <= 8:
+                interval = 2
+            elif 8 < video_length <= 16:
+                interval = 3
+
+            # else:
+            #     interval = 5
+
+            elif 16 < video_length <= 24:
+                interval = 7
+            elif 24 < video_length <= 32:
+                interval = 10
+            elif 32 < video_length <= 40:
+                interval = 14
+            elif 40 < video_length <= 48:
+                interval = 18
+            elif 48 < video_length:
+                interval = 23
+            else:
+                raise ValueError("video length is not valid")
+
+            ref_frame = random.randrange(video_length - 2 * interval)
+            first_tgt_frame = ref_frame + interval
+            second_tgt_frame = first_tgt_frame + interval
+            selected_idx = [ref_frame, first_tgt_frame, second_tgt_frame]
 
 
             # random adaptive sampling

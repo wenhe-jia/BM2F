@@ -3,6 +3,9 @@ import logging
 import math
 from typing import Tuple
 
+from scipy.optimize import linear_sum_assignment
+
+
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -18,12 +21,14 @@ from .modeling.criterion import VideoSetCriterionProj, VideoSetCriterionProjPair
 from .modeling.matcher import VideoHungarianMatcherProj, VideoHungarianMatcherProjPair
 from .utils.memory import retry_if_cuda_oom
 
-from .utils.weaksup_utils import unfold_wo_center, get_images_color_similarity
+from .utils.weaksup_utils import unfold_wo_center, get_images_color_similarity, filter_temporal_pairs_by_color_similarity
 
-import os, cv2
+import os
+import cv2
 import numpy as np
 from skimage import color
 import copy
+import random
 
 
 logger = logging.getLogger(__name__)
@@ -57,7 +62,21 @@ class VideoMaskFormer(nn.Module):
         pairwise_size,
         pairwise_dilation,
         temporal_pairwise,
+        use_input_resolution,
+        filter_temp_by_color,
         temporal_color_threshold,
+        # inference
+        tracker_type: str,
+        window_inference: bool,
+        test_topk_per_image: int,
+        is_multi_cls: bool,
+        apply_cls_thres: float,
+        merge_on_cpu: bool,
+        # tracking
+        num_max_inst_test: int,
+        num_frames_test: int,
+        num_frames_window_test: int,
+        clip_stride: int,
     ):
         """
         Args:
@@ -107,9 +126,26 @@ class VideoMaskFormer(nn.Module):
         self.pairwise_dilation = pairwise_dilation
 
         self.temporal_pairwise = temporal_pairwise
+        self.use_input_resolution = use_input_resolution
+        self.filter_temp_by_color = filter_temp_by_color
         self.temporal_color_threshold = temporal_color_threshold
 
         self.output_dir = output_dir
+
+        self.tracker_type = tracker_type  # if 'ovis' in data_name and use swin large backbone => "mdqe"
+
+        # additional args reference
+        self.is_multi_cls = is_multi_cls
+        self.apply_cls_thres = apply_cls_thres
+        self.window_inference = window_inference
+        self.test_topk_per_image = test_topk_per_image
+        self.merge_on_cpu = merge_on_cpu
+
+        # clip-by-clip tracking
+        self.num_max_inst_test = num_max_inst_test
+        self.num_frames_test = num_frames_test
+        self.num_frames_window_test = num_frames_window_test
+        self.clip_stride = clip_stride
 
     @classmethod
     def from_config(cls, cfg):
@@ -239,6 +275,7 @@ class VideoMaskFormer(nn.Module):
                 pairwise_color_thresh=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.COLOR_THRESH,
                 pairwise_warmup_iters=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.WARMUP_ITERS,
                 temporal_warmup=cfg.MODEL.MASK_FORMER_VIDEO.WEAK_SUPERVISION.WARM_UP,
+                use_input_resolution_for_temp=cfg.MODEL.MASK_FORMER_VIDEO.WEAK_SUPERVISION.USE_INPUT_RESOLUTION,
                 losses=losses,
             )
         else:
@@ -263,7 +300,21 @@ class VideoMaskFormer(nn.Module):
             "pairwise_size": cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.SIZE,
             "pairwise_dilation": cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.DILATION,
             "temporal_pairwise": temporal_pairwise,
-            "temporal_color_threshold": cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.COLOR_THRESH,
+            "use_input_resolution": cfg.MODEL.MASK_FORMER_VIDEO.WEAK_SUPERVISION.USE_INPUT_RESOLUTION,
+            "filter_temp_by_color": cfg.MODEL.MASK_FORMER_VIDEO.WEAK_SUPERVISION.FILTER_BY_COLOR,
+            "temporal_color_threshold": cfg.MODEL.MASK_FORMER_VIDEO.WEAK_SUPERVISION.TEMPORAL_COLOR_THRESH,
+            # inference
+            "tracker_type": cfg.MODEL.MASK_FORMER_VIDEO.TEST.TRACKER_TYPE,
+            "window_inference": cfg.MODEL.MASK_FORMER_VIDEO.TEST.WINDOW_INFERENCE,
+            "test_topk_per_image": cfg.TEST.DETECTIONS_PER_IMAGE,
+            "is_multi_cls": cfg.MODEL.MASK_FORMER_VIDEO.TEST.MULTI_CLS_ON,
+            "apply_cls_thres": cfg.MODEL.MASK_FORMER_VIDEO.TEST.APPLY_CLS_THRES,
+            "merge_on_cpu": cfg.MODEL.MASK_FORMER_VIDEO.TEST.MERGE_ON_CPU,
+            # tracking
+            "num_max_inst_test": cfg.MODEL.MASK_FORMER_VIDEO.TEST.NUM_MAX_INST,
+            "num_frames_test": cfg.MODEL.MASK_FORMER_VIDEO.TEST.NUM_FRAMES,
+            "num_frames_window_test": cfg.MODEL.MASK_FORMER_VIDEO.TEST.NUM_FRAMES_WINDOW,
+            "clip_stride": cfg.MODEL.MASK_FORMER_VIDEO.TEST.CLIP_STRIDE,
         }
 
     @property
@@ -334,29 +385,80 @@ class VideoMaskFormer(nn.Module):
                 else:
                     # remove this loss if not specified in `weight_dict`
                     losses.pop(k)
+
+            ##### DEBUG #####
+            if self.temporal_pairwise:
+                temppair_vid = targets[0]["total_temp_pair"]
+                pos_temppair_vid = targets[0]["pos_temp_pair"]
+                for i in range(1, len(targets)):
+                    temppair_vid += targets[i]["total_temp_pair"]
+                    pos_temppair_vid += targets[i]["pos_temp_pair"]
+                losses.update(
+                    {
+                        "loss_pos_temp_pair_prop": (pos_temppair_vid / torch.clamp(temppair_vid, min=1.0)).detach(),
+                        "loss_temp_pair_per_batch": temppair_vid.detach(),
+
+                    }
+                )
+
             return losses
         else:
-            mask_cls_results = outputs["pred_logits"]
-            mask_pred_results = outputs["pred_masks"]
+            # NOTE consider only B=1 case.
+            if self.tracker_type == 'org_m2f_offline':
+                features = self.backbone(images.tensor)
+                outputs = self.sem_seg_head(features)
 
-            mask_cls_result = mask_cls_results[0]
-            # upsample masks
-            mask_pred_result = retry_if_cuda_oom(F.interpolate)(
-                mask_pred_results[0],
-                size=(images.tensor.shape[-2], images.tensor.shape[-1]),
-                mode="bilinear",
-                align_corners=False,
-            )
+                mask_cls_results = outputs["pred_logits"]
+                mask_pred_results = outputs["pred_masks"]
 
-            del outputs
+                mask_cls_result = mask_cls_results[0]
+                # upsample masks
+                mask_pred_result = retry_if_cuda_oom(F.interpolate)(
+                    mask_pred_results[0],
+                    size=(images.tensor.shape[-2], images.tensor.shape[-1]),
+                    mode="bilinear",
+                    align_corners=False,
+                )
 
-            input_per_image = batched_inputs[0]
-            image_size = images.image_sizes[0]  # image size without padding after data augmentation
+                del outputs
 
-            height = input_per_image.get("height", image_size[0])  # raw image size before data augmentation
-            width = input_per_image.get("width", image_size[1])
+                input_per_image = batched_inputs[0]
+                image_size = images.image_sizes[0]  # image size without padding after data augmentation
 
-            return retry_if_cuda_oom(self.inference_video)(mask_cls_result, mask_pred_result, image_size, height, width, vid_path)
+                height = input_per_image.get("height", image_size[0])  # raw image size before data augmentation
+                width = input_per_image.get("width", image_size[1])
+
+                return retry_if_cuda_oom(self.inference_video_offline)(
+                    mask_cls_result, mask_pred_result, image_size, height, width
+                )
+            elif self.tracker_type == 'minvis':
+                outputs_s = self.run_window_inference(images.tensor)
+                outputs_s = self.post_processing(outputs_s)
+                return retry_if_cuda_oom(self.inference_video)(batched_inputs, images, outputs_s)
+            else:
+                raise ValueError('the type of tracker only supports {minvis, mdqe}.')
+            
+            # mask_cls_results = outputs["pred_logits"]
+            # mask_pred_results = outputs["pred_masks"]
+            # 
+            # mask_cls_result = mask_cls_results[0]
+            # # upsample masks
+            # mask_pred_result = retry_if_cuda_oom(F.interpolate)(
+            #     mask_pred_results[0],
+            #     size=(images.tensor.shape[-2], images.tensor.shape[-1]),
+            #     mode="bilinear",
+            #     align_corners=False,
+            # )
+            # 
+            # del outputs
+            # 
+            # input_per_image = batched_inputs[0]
+            # image_size = images.image_sizes[0]  # image size without padding after data augmentation
+            # 
+            # height = input_per_image.get("height", image_size[0])  # raw image size before data augmentation
+            # width = input_per_image.get("width", image_size[1])
+            # 
+            # return retry_if_cuda_oom(self.inference_video)(mask_cls_result, mask_pred_result, image_size, height, width, vid_path)
 
     def prepare_weaksup_targets(self, targets, org_images):
         """
@@ -411,13 +513,15 @@ class VideoMaskFormer(nn.Module):
         # (B*T, H, W) -> (B*T, h/4, W/4) -> (B, T, H/4, W/4)
         downsampled_image_masks = org_image_masks[:, start::stride, start::stride].reshape(B, T, _h, _w)
 
+        _org_images = org_images.reshape(B, T, 3, h_pad, w_pad) if self.use_input_resolution else None
+
         gt_instances = []
         for vid_ind, targets_per_video in enumerate(targets):
             _num_instance = len(targets_per_video["instances"][0])
 
             mask_shape = [_num_instance, T, h_pad, w_pad]
             gt_boxmasks_full_per_video = torch.zeros(mask_shape, dtype=torch.float32, device=self.device)
-            # gt_masks_full_per_video = torch.zeros(mask_shape, dtype=torch.bool, device=self.device)
+            gt_masks_full_per_video = torch.zeros(mask_shape, dtype=torch.bool, device=self.device)
             
             # x_bound_shape = [_num_instance, T, h_pad]
             # left_bounds_full_per_video = torch.zeros(x_bound_shape, dtype=torch.float32, device=self.device)
@@ -430,13 +534,14 @@ class VideoMaskFormer(nn.Module):
             color_similarity_shape = [_num_instance, T, self.pairwise_size * self.pairwise_size - 1, _h, _w]
             color_similarity_per_video = torch.zeros(color_similarity_shape, dtype=torch.float32, device=self.device)
 
+            frame_lab_vid = []
             gt_ids_per_video = []
             for f_i, targets_per_frame in enumerate(targets_per_video["instances"]):
                 targets_per_frame = targets_per_frame.to(self.device)
                 gt_ids_per_video.append(targets_per_frame.gt_ids[:, None])  # [(num_ins, 1), (num_ins, 1)]
 
-                # h, w = targets_per_frame.image_size
-                # gt_masks_full_per_video[:, f_i, :h, :w] = targets_per_frame.gt_masks.tensor
+                h, w = targets_per_frame.image_size
+                gt_masks_full_per_video[:, f_i, :h, :w] = targets_per_frame.gt_masks.tensor
 
                 # color similarity
                 # (H/4, W/4, 3)
@@ -447,6 +552,9 @@ class VideoMaskFormer(nn.Module):
                     frame_lab, downsampled_image_masks[vid_ind, f_i],
                     self.pairwise_size, self.pairwise_dilation
                 )  # (1, k*k-1, H/4, W/4)
+
+                if self.temporal_pairwise:
+                    frame_lab_vid.append(frame_lab[0])
 
                 # generate rectangle gt masks from boxes of shape (N, 4) in abs coordinates
                 if len(targets_per_frame) > 0:
@@ -469,75 +577,147 @@ class VideoMaskFormer(nn.Module):
                         # color similarity for individual instance at current frame
                         color_similarity_per_video[ins_i, f_i] = frame_color_similarity
 
-            # (G, T, h_pad/4, w_pad/4)
-            gt_boxmasks_per_video = gt_boxmasks_full_per_video[:, :, start::stride, start::stride]
-            # gt_masks_per_video = gt_masks_full_per_video[:, :, start::stride, start::stride]
-            # left_bounds_per_video = left_bounds_full_per_video[:, :, start::stride] / stride
-            # right_bounds_per_video = right_bounds_full_per_video[:, :, start::stride] / stride
-            # top_bounds_per_video = top_bounds_full_per_video[:, :, start::stride] / stride
-            # bottom_bounds_per_video = bottom_bounds_full_per_video[:, :, start::stride] / stride
-
             gt_ids_per_video = torch.cat(gt_ids_per_video, dim=1)  # (N, num_frame)
             valid_idx = (gt_ids_per_video != -1).any(dim=-1)  # (num_ins,), 别取到再所有帧上都是空的gt
 
             gt_classes_per_video = targets_per_frame.gt_classes[valid_idx]  # N,
             gt_ids_per_video = gt_ids_per_video[valid_idx]  # N, num_frames
 
+            # (G, T, h_pad/4, w_pad/4)
+            gt_boxmasks_per_video = gt_boxmasks_full_per_video[:, :, start::stride, start::stride][valid_idx].float()
+            gt_masks_per_video = gt_masks_full_per_video[:, :, start::stride, start::stride][valid_idx].float()
+            # left_bounds_per_video = left_bounds_full_per_video[:, :, start::stride] / stride
+            # right_bounds_per_video = right_bounds_full_per_video[:, :, start::stride] / stride
+            # top_bounds_per_video = top_bounds_full_per_video[:, :, start::stride] / stride
+            # bottom_bounds_per_video = bottom_bounds_full_per_video[:, :, start::stride] / stride
+            color_similarity_per_video = color_similarity_per_video[valid_idx].float()
 
+            # prepare temporal pairs
+            temp_pairs = []
+            # DEBUG
+            num_match_per_video = torch.tensor(0, dtype=torch.float32, device=self.device)
+            num_pos_match_per_video = torch.tensor(0, dtype=torch.float32, device=self.device)
             if self.temporal_pairwise:
-                temp_pairs = []
                 gt_ids_per_video_unique = torch.max(gt_ids_per_video, dim=1)[0]
                 for ins_i in range(gt_ids_per_video_unique.shape[0]):
                     gt_id = int(gt_ids_per_video_unique[ins_i])
 
-                    # for match_ind, curr_and_next in enumerate(targets_per_video["match_coords"][gt_id]):
-                    #     boxmask_curr = gt_boxmasks_per_video[ins_i, match_ind]
-                    #     boxmask_next = gt_boxmasks_per_video[ins_i, match_ind + 1]
-                    #     try:
-                    #         curr_mask_pt = boxmask_curr[
-                    #             curr_and_next["curr_pts"].to(self.device)[:, 1].long(),
-                    #             curr_and_next["curr_pts"].to(self.device)[:, 0].long()
-                    #         ]
-                    #     except:
-                    #         raise ValueError(
-                    #             'curr: ', targets[0]['file_names'][match_ind].split('/')[-2:],
-                    #             boxmask_curr.shape,
-                    #             'xmax: ', curr_and_next["curr_pts"][:, 0].max(),
-                    #             'ymax: ', curr_and_next["curr_pts"][:, 1].max()
-                    #         )
-                    #     try:
-                    #         next_mask_pt = boxmask_next[
-                    #             curr_and_next["next_pts"].to(self.device)[:, 1].long(),
-                    #             curr_and_next["next_pts"].to(self.device)[:, 0].long()
-                    #         ]
-                    #     except:
-                    #         raise ValueError(
-                    #             'next', targets[0]['file_names'][match_ind + 1].split('/')[-2:],
-                    #             boxmask_next.shape,
-                    #             'xmax: ', curr_and_next["next_pts"][:, 0].max(),
-                    #             'ymax: ', curr_and_next["next_pts"][:, 1].max()
-                    #         )
+                    temp_pairs_ins = []
+                    for match_ind, curr_and_next in enumerate(targets_per_video["match_coords"][gt_id]):
+                        curr_pts = curr_and_next["curr_pts"].to(self.device)
+                        next_pts = curr_and_next["next_pts"].to(self.device)
 
-                    temp_pairs.append(
-                        [
-                            (
-                                curr_and_next["curr_pts"].to(self.device), curr_and_next["next_pts"].to(self.device)
-                            ) for curr_and_next in targets_per_video["match_coords"][gt_id]
-                        ]
-                    )
-            else:
-                temp_pairs = None
+                        if self.use_input_resolution:
+                            curr_pts[:, 0] = curr_pts[:, 0].clamp(0, gt_boxmasks_full_per_video.shape[3] - 1)
+                            curr_pts[:, 1] = curr_pts[:, 1].clamp(0, gt_boxmasks_full_per_video.shape[2] - 1)
+                            next_pts[:, 0] = next_pts[:, 0].clamp(0, gt_boxmasks_full_per_video.shape[3] - 1)
+                            next_pts[:, 1] = next_pts[:, 1].clamp(0, gt_boxmasks_full_per_video.shape[2] - 1)
+                        else:
+                            curr_pts[:, 0] = curr_pts[:, 0].clamp(0, gt_boxmasks_per_video.shape[3] - 1)
+                            curr_pts[:, 1] = curr_pts[:, 1].clamp(0, gt_boxmasks_per_video.shape[2] - 1)
+                            next_pts[:, 0] = next_pts[:, 0].clamp(0, gt_boxmasks_per_video.shape[3] - 1)
+                            next_pts[:, 1] = next_pts[:, 1].clamp(0, gt_boxmasks_per_video.shape[2] - 1)
+
+                        if self.filter_temp_by_color:
+                            if self.use_input_resolution:
+                                curr_pts, next_pts = filter_temporal_pairs_by_color_similarity(
+                                    curr_pts, next_pts,
+                                    _org_images[vid_ind, match_ind], _org_images[vid_ind, match_ind + 1],
+                                    color_similarity_threshold=self.temporal_color_threshold,
+                                    input_image=True
+                                )
+                            else:
+                                curr_pts, next_pts = filter_temporal_pairs_by_color_similarity(
+                                    curr_pts, next_pts,
+                                    frame_lab_vid[match_ind], frame_lab_vid[match_ind + 1],
+                                    color_similarity_threshold=self.temporal_color_threshold,
+                                    input_image=False
+                                )
+                        temp_pairs_ins.append((curr_pts, next_pts))
+
+                        ##### DEBUG #####
+                        # ----- calculate positive pair -----
+                        num_match_per_video += torch.tensor(
+                            curr_pts.shape[0], dtype=torch.float32, device=self.device
+                        )
+                        num_pos_match_per_video += calculate_matching_pos(
+                            curr_pts,
+                            next_pts,
+                            gt_masks_full_per_video[ins_i, match_ind].float(),
+                            gt_masks_full_per_video[ins_i, match_ind + 1].float(),
+                        ).clone().detach()
+
+                        # ----- vis pairs -----
+                        # save_path = "/home/jiawenhe/projects/weaksup-vis/Weakly-Sup-VIS/DEBUG/vis_train/{}".format(
+                        #     targets_per_video["file_names"][0].split("/")[-2]
+                        # )
+                        # os.makedirs(save_path, exist_ok=True)
+                        #
+                        # _canvas = np.ascontiguousarray(torch.cat(
+                        #     [_org_images[vid_ind, match_ind], _org_images[vid_ind, match_ind + 1]], dim=-1
+                        # ).byte().permute(1, 2, 0).cpu().numpy())  # (H, 2*W, 3)
+                        # _canvas = np.ascontiguousarray(cv2.cvtColor(_canvas, cv2.COLOR_BGR2RGB))
+                        # mask = np.ascontiguousarray((torch.cat(
+                        #     [gt_masks_full_per_video[ins_i, match_ind], gt_masks_full_per_video[ins_i, match_ind + 1]],
+                        #     dim=-1
+                        # ) * 255)[:, :, None].repeat(1, 1, 3).byte().cpu().numpy())  # (H, 2*W)
+                        # canvas_prop = 0.75
+                        # canvas = np.ascontiguousarray(_canvas * canvas_prop + mask * (1 - canvas_prop)).astype(np.uint8)
+                        # canvas = np.ascontiguousarray(np.concatenate([canvas, _canvas], axis=0))
+                        #
+                        # next_pts_shifted = copy.deepcopy(next_pts)
+                        # next_pts_shifted[:, 0] += int(canvas.shape[1] / 2)
+                        #
+                        # draw_num = 20
+                        # if curr_pts.shape[0] < draw_num:
+                        #     draw_num = curr_pts.shape[0]
+                        # paint_inds = random.sample(range(curr_pts.shape[0]), draw_num)
+                        #
+                        # for pt_ind in range(len(paint_inds)):
+                        #     curr_pt = curr_pts[paint_inds[pt_ind]]
+                        #     next_pt = next_pts_shifted[paint_inds[pt_ind]]
+                        #     # print(
+                        #     #     '\n curr_pt: ({}, {}),  next_pt: ({}, {})'.format(
+                        #     #         int(curr_pt[0]), int(curr_pt[1]), int(next_pt[0]), int(next_pt[1])
+                        #     #     )
+                        #     # )
+                        #     line_color = COCO_CATEGORIES[np.random.randint(0, len(COCO_CATEGORIES))]
+                        #     cv2.line(
+                        #         canvas,
+                        #         (int(curr_pt[0]), int(curr_pt[1])),
+                        #         (int(next_pt[0]), int(next_pt[1])),
+                        #         (line_color[0], line_color[1], line_color[2]),
+                        #         2
+                        #     )
+                        #
+                        # save_path = os.path.join(
+                        #     save_path,
+                        #     "ins_{}_frame_{}_{}.jpg".format(
+                        #         gt_id,
+                        #         targets_per_video["file_names"][match_ind].split("/")[-1].split(".")[0],
+                        #         targets_per_video["file_names"][match_ind + 1].split("/")[-1].split(".")[0],
+                        #     )
+                        # )
+                        # cv2.imwrite(save_path, canvas)
+
+
+                    temp_pairs.append(temp_pairs_ins)
 
             gt_instances.append(
                 {
                     "labels": gt_classes_per_video, "ids": gt_ids_per_video,
-                    "box_masks": gt_boxmasks_per_video[valid_idx].float(),
+                    "box_masks": gt_boxmasks_per_video,
+                    "masks": gt_masks_per_video,
+                    "padded_input_height": h_pad,
+                    "padded_input_width": w_pad,
                     # "left_bounds": left_bounds_per_video[valid_idx].float(),
                     # "right_bounds": right_bounds_per_video[valid_idx].float(),
                     # "top_bounds": top_bounds_per_video[valid_idx].float(),
                     # "bottom_bounds": bottom_bounds_per_video[valid_idx].float(),
-                    "color_similarities": color_similarity_per_video[valid_idx].float(),
+                    "color_similarities": color_similarity_per_video,
                     "temporal_pairs": temp_pairs,
+                    "total_temp_pair": num_match_per_video,
+                    "pos_temp_pair": num_pos_match_per_video,
                 }
             )
         return gt_instances
@@ -570,8 +750,8 @@ class VideoMaskFormer(nn.Module):
             gt_masks_per_video = gt_masks_per_video[valid_idx].float()  # N, num_frames, H, W
             gt_instances[-1].update({"masks": gt_masks_per_video})
         return gt_instances
-
-    def inference_video(self, pred_cls, pred_masks, img_size, output_height, output_width, vid_path):
+    
+    def inference_video_offline(self, pred_cls, pred_masks, img_size, output_height, output_width):
         if len(pred_cls) > 0:
             scores = F.softmax(pred_cls, dim=-1)[:, :-1]
             labels = torch.arange(self.sem_seg_head.num_classes, device=self.device).unsqueeze(0).repeat(self.num_queries, 1).flatten(0, 1)
@@ -615,3 +795,275 @@ class VideoMaskFormer(nn.Module):
         }
 
         return video_output
+
+    def run_window_inference(self, images_tensor):
+        out_list = []
+        start_idx_window, end_idx_window = 0, 0
+        for i in range(len(images_tensor)):
+            if i + self.num_frames_test > len(images_tensor):
+                break
+
+            if i + self.num_frames_test > end_idx_window:
+                start_idx_window, end_idx_window = i, i + self.num_frames_window_test
+                frame_idx_window = range(start_idx_window, end_idx_window)
+                features_window = self.backbone(images_tensor[start_idx_window:end_idx_window])
+
+            features = {k: v[frame_idx_window.index(i):frame_idx_window.index(i)+self.num_frames_test]
+                        for k, v in features_window.items()}
+            out = self.sem_seg_head(features)
+            del out['aux_outputs']
+            if self.merge_on_cpu:
+                out = {k: v.cpu() for k, v in out.items()}
+            out_list.append(out)
+
+        outputs = {}
+        # (vid_length - temp_stride + 1) x Q x Cls
+        outputs['pred_logits'] = torch.cat([x['pred_logits'].float() for x in out_list]).detach()  # (V-t+1)xQxK
+        # (vid_length - temp_stride + 1) x Q x T x H x W
+        outputs['pred_masks'] = torch.cat([x['pred_masks'].float() for x in out_list]).detach()  # (V-t+1)xQxtxHxW
+        # (vid_length - temp_stride + 1) x Q x D
+        outputs['pred_embds'] = torch.cat([x['pred_embds'].float() for x in out_list]).detach()  # (V-t+1)xQxC
+        return outputs
+
+    def post_processing(self, outputs):
+        n_clips, q, n_t, h, w = outputs['pred_masks'].shape
+        pred_logits = list(torch.unbind(outputs['pred_logits']))  # (V-t+1) q c
+        pred_masks = list(torch.unbind(outputs['pred_masks']))    # (V-t+1) q t h w
+        pred_embds = list(torch.unbind(outputs['pred_embds']))    # (V-t+1) q d
+
+        # 使用第一个 clip 的结果做 tracking 的初始化
+        out_logits = [pred_logits[0]]
+        out_masks = [pred_masks[0]]
+        out_embds = [pred_embds[0]]
+        for i in range(1, len(pred_logits)):
+            mem_embds = torch.stack(out_embds[-2:]).mean(dim=0)  # [(q, c), (q, c)] -> (2, q, c) -> (q, c)
+            indices = self.match_from_embds(mem_embds, pred_embds[i])
+            out_logits.append(pred_logits[i][indices, :])
+            out_masks.append(pred_masks[i][indices, :, :, :])
+            out_embds.append(pred_embds[i][indices, :])
+
+        out_logits = sum(out_logits) / len(out_logits)
+        out_masks_mean = []
+        for v in range(n_clips+n_t-1):
+            n_t_valid = min(v+1, n_t)
+            m = []
+            for t in range(n_t_valid):
+                if v-t < n_clips:
+                    m.append(out_masks[v-t][:, t])  # q, h, w
+            out_masks_mean.append(torch.stack(m).mean(dim=0))  # q, h, w
+
+        outputs['pred_masks'] = torch.stack(out_masks_mean, dim=1)  # t * [q h w] -> q t h w
+        outputs['pred_scores'] = F.softmax(out_logits, dim=-1)[:, :-1]  # q k+1
+        return outputs
+
+    def match_from_embds(self, tgt_embds, cur_embds):
+        cur_embds = cur_embds / cur_embds.norm(dim=1)[:, None]
+        tgt_embds = tgt_embds / tgt_embds.norm(dim=1)[:, None]
+        cos_sim = torch.mm(cur_embds, tgt_embds.transpose(0, 1))
+
+        cost_embd = 1 - cos_sim
+        C = 1.0 * cost_embd
+        C = C.cpu()
+
+        indices = linear_sum_assignment(C.transpose(0, 1))  # target x current
+        indices = indices[1]  # permutation that makes current aligns to target
+
+        return indices
+    
+    def inference_video(self, batched_inputs, images, outputs):
+        mask_scores = outputs["pred_scores"]  # cQ, K+1
+        mask_pred = outputs["pred_masks"]  # cQ, V, H, W or [V/C * (cQ, C, H, W)]
+
+        # upsample masks
+        interim_size = images.tensor.shape[-2:]
+        image_size = images.image_sizes[0]  # image size without padding after data augmentation
+        out_height = batched_inputs[0].get("height", image_size[0])  # raw image size before data augmentation
+        out_width = batched_inputs[0].get("width", image_size[1])
+
+        num_topk = max(int(mask_scores.gt(0.05).sum()), self.test_topk_per_image)
+        labels = torch.arange(self.sem_seg_head.num_classes, device=self.device).unsqueeze(0).repeat(
+            self.num_queries, 1).flatten(0, 1)
+        scores_per_video, topk_indices = mask_scores.flatten(0, 1).topk(num_topk, sorted=False)
+        labels_per_video = labels[topk_indices]
+        topk_indices = torch.div(topk_indices, self.sem_seg_head.num_classes, rounding_mode='floor')
+
+        mask_pred = mask_pred[topk_indices]
+        mask_pred = retry_if_cuda_oom(F.interpolate)(
+            mask_pred,
+            size=interim_size,
+            mode="bilinear",
+            align_corners=False,
+        )  # cQ, t, H, W
+        mask_pred = mask_pred[:, :, : image_size[0], : image_size[1]]
+
+        mask_quality_scores = (mask_pred > 1).flatten(1).sum(1) / (mask_pred > -1).flatten(1).sum(1).clamp(min=1)
+        scores_per_video = scores_per_video * mask_quality_scores
+
+        masks_per_video = []
+        for m in mask_pred:
+            # slower speed but memory efficiently for long videos
+            m = retry_if_cuda_oom(F.interpolate)(
+                m.unsqueeze(0),
+                size=(out_height, out_width),
+                mode="bilinear",
+                align_corners=False
+            ).squeeze(0) > 0.
+            masks_per_video.append(m.cpu())
+
+        scores_per_video = scores_per_video.tolist()
+        labels_per_video = labels_per_video.tolist()
+
+        processed_results = {
+            "image_size": (out_height, out_width),
+            "pred_scores": scores_per_video,
+            "pred_labels": labels_per_video,
+            "pred_masks": masks_per_video,
+        }
+
+        return processed_results
+
+
+def calculate_matching_pos(curr_kps, next_kps, curr_mask, next_mask):
+    curr_kps = curr_kps.long()
+    next_kps = next_kps.long()
+    curr_label = curr_mask[curr_kps[:, 1], curr_kps[:, 0]]
+    next_label = next_mask[next_kps[:, 1], next_kps[:, 0]]
+    pos_match = ((curr_label - next_label) == 0).float().sum()
+    return pos_match
+
+
+COCO_CATEGORIES = [
+    [220, 20, 60],
+    [119, 11, 32],
+    [0, 0, 142],
+    [0, 0, 230],
+    [106, 0, 228],
+    [0, 60, 100],
+    [0, 80, 100],
+    [0, 0, 70],
+    [0, 0, 192],
+    [250, 170, 30],
+    [100, 170, 30],
+    [220, 220, 0],
+    [175, 116, 175],
+    [250, 0, 30],
+    [165, 42, 42],
+    [255, 77, 255],
+    [0, 226, 252],
+    [182, 182, 255],
+    [0, 82, 0],
+    [120, 166, 157],
+    [110, 76, 0],
+    [174, 57, 255],
+    [199, 100, 0],
+    [72, 0, 118],
+    [255, 179, 240],
+    [0, 125, 92],
+    [209, 0, 151],
+    [188, 208, 182],
+    [0, 220, 176],
+    [255, 99, 164],
+    [92, 0, 73],
+    [133, 129, 255],
+    [78, 180, 255],
+    [0, 228, 0],
+    [174, 255, 243],
+    [45, 89, 255],
+    [134, 134, 103],
+    [145, 148, 174],
+    [255, 208, 186],
+    [197, 226, 255],
+    [171, 134, 1],
+    [109, 63, 54],
+    [207, 138, 255],
+    [151, 0, 95],
+    [9, 80, 61],
+    [84, 105, 51],
+    [74, 65, 105],
+    [166, 196, 102],
+    [208, 195, 210],
+    [255, 109, 65],
+    [0, 143, 149],
+    [179, 0, 194],
+    [209, 99, 106],
+    [5, 121, 0],
+    [227, 255, 205],
+    [147, 186, 208],
+    [153, 69, 1],
+    [3, 95, 161],
+    [163, 255, 0],
+    [119, 0, 170],
+    [0, 182, 199],
+    [0, 165, 120],
+    [183, 130, 88],
+    [95, 32, 0],
+    [130, 114, 135],
+    [110, 129, 133],
+    [166, 74, 118],
+    [219, 142, 185],
+    [79, 210, 114],
+    [178, 90, 62],
+    [65, 70, 15],
+    [127, 167, 115],
+    [59, 105, 106],
+    [142, 108, 45],
+    [196, 172, 0],
+    [95, 54, 80],
+    [128, 76, 255],
+    [201, 57, 1],
+    [246, 0, 122],
+    [191, 162, 208],
+    [255, 255, 128],
+    [147, 211, 203],
+    [150, 100, 100],
+    [168, 171, 172],
+    [146, 112, 198],
+    [210, 170, 100],
+    [92, 136, 89],
+    [218, 88, 184],
+    [241, 129, 0],
+    [217, 17, 255],
+    [124, 74, 181],
+    [70, 70, 70],
+    [255, 228, 255],
+    [154, 208, 0],
+    [193, 0, 92],
+    [76, 91, 113],
+    [255, 180, 195],
+    [106, 154, 176],
+    [230, 150, 140],
+    [60, 143, 255],
+    [128, 64, 128],
+    [92, 82, 55],
+    [254, 212, 124],
+    [73, 77, 174],
+    [255, 160, 98],
+    [255, 255, 255],
+    [104, 84, 109],
+    [169, 164, 131],
+    [225, 199, 255],
+    [137, 54, 74],
+    [135, 158, 223],
+    [7, 246, 231],
+    [107, 255, 200],
+    [58, 41, 149],
+    [183, 121, 142],
+    [255, 73, 97],
+    [107, 142, 35],
+    [190, 153, 153],
+    [146, 139, 141],
+    [70, 130, 180],
+    [134, 199, 156],
+    [209, 226, 140],
+    [96, 36, 108],
+    [96, 96, 96],
+    [64, 170, 64],
+    [152, 251, 152],
+    [208, 229, 228],
+    [206, 186, 171],
+    [152, 161, 64],
+    [116, 112, 0],
+    [0, 114, 143],
+    [102, 102, 156],
+    [250, 141, 255],
+]

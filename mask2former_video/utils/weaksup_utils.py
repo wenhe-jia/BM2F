@@ -4,6 +4,10 @@ import torch.nn.functional as F
 from detectron2.projects.point_rend.point_features import point_sample
 from detectron2.layers import cat
 
+import numpy as np
+from skimage import color
+
+
 def unfold_wo_center(x, kernel_size, dilation):
     # 在每个点的周围取一系列值，图像之外pad的部分就是0了
     assert x.dim() == 4
@@ -56,6 +60,7 @@ def get_images_color_similarity(images, image_masks, kernel_size, dilation):
     unfolded_weights = torch.max(unfolded_weights, dim=1)[0]  # (1, k*k-1, H/4, W/4)
 
     return similarity * unfolded_weights
+
 
 def get_inconstant_point_coords_with_randomness(
     coarse_logits, variance_func, num_points, oversample_ratio, importance_sample_ratio
@@ -110,3 +115,46 @@ def get_inconstant_point_coords_with_randomness(
             dim=1,
         )
     return point_coords
+
+
+def filter_temporal_pairs_by_color_similarity(
+    coords_curr,
+    coords_next,
+    frame_curr,
+    frame_next,
+    color_similarity_threshold=0.3,
+    input_image=False
+):
+    """
+
+    :param coords_curr: (k, 2)
+    :param coords_next: (k, 2)
+    :param frame_curr: tensor(3, h, w)
+    :param frame_next: tensor(3, h, w)
+    :param color_similarity_threshold: float
+    :param input_image: bool
+    :return: coords_curr, coords_next
+    """
+
+    if input_image:
+        frame_lab_curr = torch.as_tensor(
+            color.rgb2lab(frame_curr.byte().permute(1, 2, 0).cpu().numpy()),
+            device=frame_curr.device, dtype=torch.float32
+        ).permute(2, 0, 1)
+        frame_lab_next = torch.as_tensor(
+            color.rgb2lab(frame_next.byte().permute(1, 2, 0).cpu().numpy()),
+            device=frame_next.device, dtype=torch.float32
+        ).permute(2, 0, 1)
+    else:
+        frame_lab_curr = frame_curr
+        frame_lab_next = frame_next
+
+    # （3, k)
+    lab_pix_curr = frame_lab_curr[:, coords_curr[:, 1].long(), coords_curr[:, 0].long()]
+    lab_pix_next = frame_lab_next[:, coords_next[:, 1].long(), coords_next[:, 0].long()]
+
+    diff = lab_pix_curr - lab_pix_next
+    similarity = torch.exp(-torch.norm(diff, dim=0) * 0.5)  # (k,)
+    # keep_ind = torch.where(similarity >= color_similarity_threshold)[0].cpu()
+    keep_ind = torch.where(similarity >= color_similarity_threshold)[0]  # DEBUG
+    return coords_curr[keep_ind].to(dtype=torch.int16), coords_next[keep_ind].to(dtype=torch.int16)
