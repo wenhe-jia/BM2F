@@ -157,9 +157,13 @@ class YTVISDatasetMapperWithCoords:
         self.temp_dist_thr                 = temp_dist_thr
         self.use_input_resolution_for_temp = use_input_resolution_for_temp
         self.fixed_sampling_interval       = fixed_sampling_interval
-        self.matching_file_path            = "matching_coords_vitg_corr_top{}_frame{}".format(
-            temporal_topk, sampling_frame_num
-        )
+
+        # matching_file_path = "matching_coords_vitg_ShortRange_NormDist_top{}_frame{}".format(
+        #     temporal_topk,
+        #     sampling_frame_num
+        # )
+        matching_file_path = "matching_coords_vitg_ShortRange_NormDist_top10_frame{}".format(sampling_frame_num)
+        self.matching_file_path = matching_file_path
         assert self.temporal_topk >= 1
 
         # fmt: on
@@ -232,18 +236,22 @@ class YTVISDatasetMapperWithCoords:
                         interval = 2
                     elif 8 < video_length <= 16:
                         interval = 3
-                    elif 16 < video_length <= 24:
-                        interval = 7
-                    elif 24 < video_length <= 32:
-                        interval = 10
-                    elif 32 < video_length <= 40:
-                        interval = 14
-                    elif 40 < video_length <= 48:
-                        interval = 18
-                    elif 48 < video_length:
-                        interval = 23
+
                     else:
-                        raise ValueError("video length is not valid")
+                        interval = 5
+
+                    # elif 16 < video_length <= 24:
+                    #     interval = 7
+                    # elif 24 < video_length <= 32:
+                    #     interval = 10
+                    # elif 32 < video_length <= 40:
+                    #     interval = 14
+                    # elif 40 < video_length <= 48:
+                    #     interval = 18
+                    # elif 48 < video_length:
+                    #     interval = 23
+                    # else:
+                    #     raise ValueError("video length is not valid")
 
                     ref_frame = random.randrange(video_length - 2 * interval)
                     first_tgt_frame = ref_frame + interval
@@ -388,7 +396,7 @@ class YTVISDatasetMapperWithCoords:
                                 next_pts_ins = torch.as_tensor(
                                     np.ascontiguousarray(np.array(_match_coords["next_pts"]) * scale_factor)
                                 )
-                                corrs = torch.as_tensor(
+                                dists = torch.as_tensor(
                                     np.ascontiguousarray(np.array(_match_coords["corr"]))
                                 )
                                 assert curr_pts_ins.shape == next_pts_ins.shape
@@ -408,7 +416,7 @@ class YTVISDatasetMapperWithCoords:
 
                                 curr_pts_ins = curr_pts_ins.reshape((pt_num, saved_topk, 2))
                                 next_pts_ins = next_pts_ins.reshape((pt_num, saved_topk, 2))
-                                coors = corrs.reshape((pt_num, saved_topk))
+                                dists = dists.reshape((pt_num, saved_topk))
 
                                 if saved_topk > self.temporal_topk:
                                     keep_num = self.temporal_topk
@@ -417,10 +425,10 @@ class YTVISDatasetMapperWithCoords:
 
                                 _curr_pts_ins = curr_pts_ins[:, :keep_num, :].flatten(0, 1)
                                 _next_pts_ins = next_pts_ins[:, :keep_num, :].flatten(0, 1)
-                                _coors = coors[:, :keep_num].flatten(0, 1)
+                                _dists = dists[:, :keep_num].flatten(0, 1)
 
                                 # filter matching by correlations
-                                keep_inds = torch.where(corrs < self.temp_dist_thr)[0]
+                                keep_inds = torch.where(_dists < self.temp_dist_thr)[0]
                                 # print('\n keep proportion: ', keep_inds.shape[0] / (corrs.shape[0] + 1))
 
                                 _curr_pts_ins = _curr_pts_ins[keep_inds]
