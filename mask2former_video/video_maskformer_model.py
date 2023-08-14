@@ -17,8 +17,8 @@ from detectron2.modeling.backbone import Backbone
 from detectron2.modeling.postprocessing import sem_seg_postprocess
 from detectron2.structures import Boxes, ImageList, Instances, BitMasks
 
-from .modeling.criterion import VideoSetCriterionProj, VideoSetCriterionProjPair, VideoSetCriterionProjSTPair
-from .modeling.matcher import VideoHungarianMatcherProj, VideoHungarianMatcherProjPair
+from .modeling.criterion import VideoSetCriterion, VideoSetCriterionProj, VideoSetCriterionProjPair, VideoSetCriterionProjSTPair
+from .modeling.matcher import VideoHungarianMatcher, VideoHungarianMatcherProj, VideoHungarianMatcherProjPair
 from .utils.memory import retry_if_cuda_oom
 
 from .utils.weaksup_utils import unfold_wo_center, get_images_color_similarity, filter_temporal_pairs_by_color_similarity

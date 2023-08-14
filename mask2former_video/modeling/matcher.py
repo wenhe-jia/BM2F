@@ -15,9 +15,7 @@ from detectron2.structures.masks import BitMasks
 
 from ..utils.weaksup_utils import unfold_wo_center
 
-#############################################
-############ original projection ############
-#############################################
+
 def batch_dice_loss(inputs: torch.Tensor, targets: torch.Tensor):
     """
     Compute the DICE loss, similar to generalized IOU for masks
@@ -40,6 +38,41 @@ batch_dice_loss_jit = torch.jit.script(
 )  # type: torch.jit.ScriptModule
 
 
+def batch_sigmoid_ce_loss(inputs: torch.Tensor, targets: torch.Tensor):
+    """
+    Args:
+        inputs: A float tensor of arbitrary shape.
+                The predictions for each example.
+        targets: A float tensor with the same shape as inputs. Stores the binary
+                 classification label for each element in inputs
+                (0 for the negative class and 1 for the positive class).
+    Returns:
+        Loss tensor
+    """
+    hw = inputs.shape[1]
+
+    pos = F.binary_cross_entropy_with_logits(
+        inputs, torch.ones_like(inputs), reduction="none"
+    )
+    neg = F.binary_cross_entropy_with_logits(
+        inputs, torch.zeros_like(inputs), reduction="none"
+    )
+
+    loss = torch.einsum("nc,mc->nm", pos, targets) + torch.einsum(
+        "nc,mc->nm", neg, (1 - targets)
+    )
+
+    return loss / hw
+
+
+batch_sigmoid_ce_loss_jit = torch.jit.script(
+    batch_sigmoid_ce_loss
+)  # type: torch.jit.ScriptModule
+
+
+#############################################
+############ original projection ############
+#############################################
 def batch_axis_projection(out_mask, tgt_box_mask, axis):
     """
     :param out_mask: (N, T, H, W)
@@ -499,6 +532,7 @@ class VideoHungarianMatcherProj(nn.Module):
         ]
         lines = [head] + [" " * _repr_indent + line for line in body]
         return "\n".join(lines)
+
 
 class VideoHungarianMatcher(nn.Module):
     """This class computes an assignment between the targets and the predictions of the network
