@@ -307,27 +307,27 @@ class VideoHungarianMatcherProjPair(nn.Module):
 
             # gt masks are already padded when preparing target
             tgt_boxmask = targets[b]["box_masks"].to(out_mask)  # (G, T, H, W), 有可能有空的mask(dummy)
-            # tgt_left_bounds = targets[b]["left_bounds"].to(out_mask)  # (G, T, H)
-            # tgt_right_bounds = targets[b]["right_bounds"].to(out_mask)  # (G, T, H)
-            # tgt_top_bounds = targets[b]["top_bounds"].to(out_mask)  # (G, T, W)
-            # tgt_bottom_bounds = targets[b]["bottom_bounds"].to(out_mask)  # (G, T, W)
+            tgt_left_bounds = targets[b]["left_bounds"].to(out_mask)  # (G, T, H)
+            tgt_right_bounds = targets[b]["right_bounds"].to(out_mask)  # (G, T, H)
+            tgt_top_bounds = targets[b]["top_bounds"].to(out_mask)  # (G, T, W)
+            tgt_bottom_bounds = targets[b]["bottom_bounds"].to(out_mask)  # (G, T, W)
             tgt_similarities = targets[b]["color_similarities"].to(out_mask)  # (G, T, k*k-1, H, W)
 
             if tgt_ids.shape[0] > 0:
                 with autocast(enabled=False):
                     ##### projection #####
                     # original projection
-                    cost_projection = batch_axis_projection(out_mask, tgt_boxmask, 3) +  \
-                                      batch_axis_projection(out_mask, tgt_boxmask, 2)
+                    # cost_projection = batch_axis_projection(out_mask, tgt_boxmask, 3) +  \
+                    #                   batch_axis_projection(out_mask, tgt_boxmask, 2)
 
                     # projection limited label
-                    # cost_projection = \
-                    #     batch_axis_projection_limited_label(
-                    #         out_mask, tgt_boxmask, tgt_left_bounds, tgt_right_bounds, axis=-1
-                    #     ) + \
-                    #     batch_axis_projection_limited_label(
-                    #         out_mask, tgt_boxmask, tgt_top_bounds, tgt_bottom_bounds, axis=-2
-                    #     )
+                    cost_projection = \
+                        batch_axis_projection_limited_label(
+                            out_mask, tgt_boxmask, tgt_left_bounds, tgt_right_bounds, axis=-1
+                        ) + \
+                        batch_axis_projection_limited_label(
+                            out_mask, tgt_boxmask, tgt_top_bounds, tgt_bottom_bounds, axis=-2
+                        )
 
                     ##### color similarity #####
                     warmup_factor = min(self._iter.item() / float(self.pairwise_warmup_iters), 1.0)
@@ -443,17 +443,17 @@ class VideoHungarianMatcherProj(nn.Module):
             if tgt_ids.shape[0] > 0:
                 with autocast(enabled=False):
                     # original projection
-                    cost_projection = batch_axis_projection(out_mask, tgt_boxmask, 3) + \
-                                      batch_axis_projection(out_mask, tgt_boxmask, 2)
+                    # cost_projection = batch_axis_projection(out_mask, tgt_boxmask, 3) + \
+                    #                   batch_axis_projection(out_mask, tgt_boxmask, 2)
 
                     # projection limited label
-                    # cost_projection = \
-                    #     batch_axis_projection_limited_label(
-                    #         out_mask, tgt_boxmask, tgt_left_bounds, tgt_right_bounds, axis=-1
-                    #     ) + \
-                    #     batch_axis_projection_limited_label(
-                    #         out_mask, tgt_boxmask, tgt_top_bounds, tgt_bottom_bounds, axis=-2
-                    #     )
+                    cost_projection = \
+                        batch_axis_projection_limited_label(
+                            out_mask, tgt_boxmask, tgt_left_bounds, tgt_right_bounds, axis=-1
+                        ) + \
+                        batch_axis_projection_limited_label(
+                            out_mask, tgt_boxmask, tgt_top_bounds, tgt_bottom_bounds, axis=-2
+                        )
             else:
                 cost_projection = torch.zeros((num_queries, 0), dtype=torch.float32, device=out_prob.device)
 

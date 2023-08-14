@@ -523,13 +523,13 @@ class VideoMaskFormer(nn.Module):
             gt_boxmasks_full_per_video = torch.zeros(mask_shape, dtype=torch.float32, device=self.device)
             gt_masks_full_per_video = torch.zeros(mask_shape, dtype=torch.bool, device=self.device)
             
-            # x_bound_shape = [_num_instance, T, h_pad]
-            # left_bounds_full_per_video = torch.zeros(x_bound_shape, dtype=torch.float32, device=self.device)
-            # right_bounds_full_per_video = torch.zeros(x_bound_shape, dtype=torch.float32, device=self.device)
-            #
-            # y_bound_shape = [_num_instance, T, w_pad]
-            # top_bounds_full_per_video = torch.zeros(y_bound_shape, dtype=torch.float32, device=self.device)
-            # bottom_bounds_full_per_video = torch.zeros(y_bound_shape, dtype=torch.float32, device=self.device)
+            x_bound_shape = [_num_instance, T, h_pad]
+            left_bounds_full_per_video = torch.zeros(x_bound_shape, dtype=torch.float32, device=self.device)
+            right_bounds_full_per_video = torch.zeros(x_bound_shape, dtype=torch.float32, device=self.device)
+
+            y_bound_shape = [_num_instance, T, w_pad]
+            top_bounds_full_per_video = torch.zeros(y_bound_shape, dtype=torch.float32, device=self.device)
+            bottom_bounds_full_per_video = torch.zeros(y_bound_shape, dtype=torch.float32, device=self.device)
 
             color_similarity_shape = [_num_instance, T, self.pairwise_size * self.pairwise_size - 1, _h, _w]
             color_similarity_per_video = torch.zeros(color_similarity_shape, dtype=torch.float32, device=self.device)
@@ -564,15 +564,15 @@ class VideoMaskFormer(nn.Module):
                             ins_i, f_i, int(gt_box[1]):int(gt_box[3] + 1), int(gt_box[0]):int(gt_box[2] + 1)
                         ] = 1.0
 
-                        # gt_mask = gt_boxmasks_full_per_video[ins_i, f_i].int()  # (H, W)
-                        # # bounds for y projection
-                        # left_bounds_full_per_video[ins_i, f_i] = torch.argmax(gt_mask, dim=1)
-                        # right_bounds_full_per_video[ins_i, f_i] = gt_mask.shape[1] - \
-                        #                                            torch.argmax(gt_mask.flip(1), dim=1)
-                        # # bounds for x projection
-                        # top_bounds_full_per_video[ins_i, f_i] = torch.argmax(gt_mask, dim=0)
-                        # bottom_bounds_full_per_video[ins_i, f_i] = gt_mask.shape[0] - \
-                        #                                       torch.argmax(gt_mask.flip(0), dim=0)
+                        gt_mask = gt_boxmasks_full_per_video[ins_i, f_i].int()  # (H, W)
+                        # bounds for y projection
+                        left_bounds_full_per_video[ins_i, f_i] = torch.argmax(gt_mask, dim=1)
+                        right_bounds_full_per_video[ins_i, f_i] = gt_mask.shape[1] - \
+                                                                   torch.argmax(gt_mask.flip(1), dim=1)
+                        # bounds for x projection
+                        top_bounds_full_per_video[ins_i, f_i] = torch.argmax(gt_mask, dim=0)
+                        bottom_bounds_full_per_video[ins_i, f_i] = gt_mask.shape[0] - \
+                                                              torch.argmax(gt_mask.flip(0), dim=0)
 
                         # color similarity for individual instance at current frame
                         color_similarity_per_video[ins_i, f_i] = frame_color_similarity
@@ -586,10 +586,10 @@ class VideoMaskFormer(nn.Module):
             # (G, T, h_pad/4, w_pad/4)
             gt_boxmasks_per_video = gt_boxmasks_full_per_video[:, :, start::stride, start::stride][valid_idx].float()
             gt_masks_per_video = gt_masks_full_per_video[:, :, start::stride, start::stride][valid_idx].float()
-            # left_bounds_per_video = left_bounds_full_per_video[:, :, start::stride] / stride
-            # right_bounds_per_video = right_bounds_full_per_video[:, :, start::stride] / stride
-            # top_bounds_per_video = top_bounds_full_per_video[:, :, start::stride] / stride
-            # bottom_bounds_per_video = bottom_bounds_full_per_video[:, :, start::stride] / stride
+            left_bounds_per_video = left_bounds_full_per_video[:, :, start::stride] / stride
+            right_bounds_per_video = right_bounds_full_per_video[:, :, start::stride] / stride
+            top_bounds_per_video = top_bounds_full_per_video[:, :, start::stride] / stride
+            bottom_bounds_per_video = bottom_bounds_full_per_video[:, :, start::stride] / stride
             color_similarity_per_video = color_similarity_per_video[valid_idx].float()
 
             # prepare temporal pairs
@@ -710,10 +710,10 @@ class VideoMaskFormer(nn.Module):
                     "masks": gt_masks_per_video,
                     "padded_input_height": h_pad,
                     "padded_input_width": w_pad,
-                    # "left_bounds": left_bounds_per_video[valid_idx].float(),
-                    # "right_bounds": right_bounds_per_video[valid_idx].float(),
-                    # "top_bounds": top_bounds_per_video[valid_idx].float(),
-                    # "bottom_bounds": bottom_bounds_per_video[valid_idx].float(),
+                    "left_bounds": left_bounds_per_video[valid_idx].float(),
+                    "right_bounds": right_bounds_per_video[valid_idx].float(),
+                    "top_bounds": top_bounds_per_video[valid_idx].float(),
+                    "bottom_bounds": bottom_bounds_per_video[valid_idx].float(),
                     "color_similarities": color_similarity_per_video,
                     "temporal_pairs": temp_pairs,
                     "total_temp_pair": num_match_per_video,

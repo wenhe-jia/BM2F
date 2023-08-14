@@ -134,6 +134,7 @@ class YTVISDatasetMapperWithCoords:
         temp_dist_thr: float = 0.9,
         use_input_resolution_for_temp: bool = False,
         fixed_sampling_interval: bool = False,
+        pca_split_match: bool = False,
     ):
         """
         NOTE: this interface is experimental.
@@ -157,12 +158,13 @@ class YTVISDatasetMapperWithCoords:
         self.temp_dist_thr                 = temp_dist_thr
         self.use_input_resolution_for_temp = use_input_resolution_for_temp
         self.fixed_sampling_interval       = fixed_sampling_interval
+        self.pca_split_match               = pca_split_match
 
         # matching_file_path = "matching_coords_vitg_ShortRange_NormDist_top{}_frame{}".format(
         #     temporal_topk,
         #     sampling_frame_num
         # )
-        matching_file_path = "matching_coords_vitg_ShortRange_NormDist_top10_frame{}".format(sampling_frame_num)
+        matching_file_path = "matching_coords_vitg_ShortRange_NormDistPCA_top10_frame3"
         self.matching_file_path = matching_file_path
         assert self.temporal_topk >= 1
 
@@ -192,6 +194,7 @@ class YTVISDatasetMapperWithCoords:
             "temp_dist_thr": cfg.MODEL.MASK_FORMER_VIDEO.WEAK_SUPERVISION.TEMPORAL_DIST_THRESH,
             "use_input_resolution_for_temp": cfg.MODEL.MASK_FORMER_VIDEO.WEAK_SUPERVISION.USE_INPUT_RESOLUTION,
             "fixed_sampling_interval": cfg.INPUT.FIXED_SAMPLING_INTERVAL,
+            "pca_split_match": cfg.MODEL.MASK_FORMER_VIDEO.WEAK_SUPERVISION.PCA_SPLIT_MATCH,
         }
 
         return ret
@@ -384,55 +387,155 @@ class YTVISDatasetMapperWithCoords:
                         # 当前两帧中所有实例的匹配关系，每个实例的匹配关系是一个dict，包含id和coords，
                         # 每个实例的匹配关系是一个dict，包含curr_pts和next_pts
                         for i, ins_match in enumerate(ins_matches):
-                            for _id, _match_coords in ins_match.items():
+                            for _id, _match_contents in ins_match.items():
                                 _id = int(_id)
                                 assert _id in _gt_ids
 
+                                if self.pca_split_match:
+                                    # PCA split matching
+                                    # main
+                                    main_contents = _match_contents["main"]
+                                    main_curr_pts_ins = torch.as_tensor(
+                                        np.ascontiguousarray(np.array(main_contents["curr_pts"]) * scale_factor)
+                                    )
+                                    main_next_pts_ins = torch.as_tensor(
+                                        np.ascontiguousarray(np.array(main_contents["next_pts"]) * scale_factor)
+                                    )
+                                    main_dists = torch.as_tensor(
+                                        np.ascontiguousarray(np.array(main_contents["dist"]))
+                                    )
+                                    main_saved_topk = main_contents["topk"]
+                                    assert main_curr_pts_ins.shape == main_next_pts_ins.shape
 
-                                # grab the matching coordinates and apply transform
-                                curr_pts_ins = torch.as_tensor(
-                                    np.ascontiguousarray(np.array(_match_coords["curr_pts"]) * scale_factor)
-                                )
-                                next_pts_ins = torch.as_tensor(
-                                    np.ascontiguousarray(np.array(_match_coords["next_pts"]) * scale_factor)
-                                )
-                                dists = torch.as_tensor(
-                                    np.ascontiguousarray(np.array(_match_coords["corr"]))
-                                )
-                                assert curr_pts_ins.shape == next_pts_ins.shape
+                                    if main_curr_pts_ins.shape[0] != 0:
+                                        if do_hflip:
+                                            main_curr_pts_ins[:, 0] = image_shape[1] - (main_curr_pts_ins[:, 0] + 1)
+                                            main_next_pts_ins[:, 0] = image_shape[1] - (main_next_pts_ins[:, 0] + 1)
 
-                                if do_hflip:
-                                    curr_pts_ins[:, 0] = image_shape[1] - (curr_pts_ins[:, 0] + 1)
-                                    next_pts_ins[:, 0] = image_shape[1] - (next_pts_ins[:, 0] + 1)
+                                        if not self.use_input_resolution_for_temp:
+                                            main_curr_pts_ins *= 0.25
+                                            main_next_pts_ins *= 0.25
 
-                                if not self.use_input_resolution_for_temp:
-                                    curr_pts_ins *= 0.25
-                                    next_pts_ins *= 0.25
+                                        assert main_curr_pts_ins.shape[0] % main_saved_topk == 0
+                                        main_pt_num = int(main_curr_pts_ins.shape[0] / main_saved_topk)
 
-                                # 选取topk个点
-                                saved_topk = _match_coords["topk"]
-                                assert curr_pts_ins.shape[0] % saved_topk == 0
-                                pt_num = int(curr_pts_ins.shape[0] / saved_topk)
+                                        main_curr_pts_ins = main_curr_pts_ins.reshape((main_pt_num, main_saved_topk, 2))
+                                        main_next_pts_ins = main_next_pts_ins.reshape((main_pt_num, main_saved_topk, 2))
+                                        main_dists = main_dists.reshape((main_pt_num, main_saved_topk))
 
-                                curr_pts_ins = curr_pts_ins.reshape((pt_num, saved_topk, 2))
-                                next_pts_ins = next_pts_ins.reshape((pt_num, saved_topk, 2))
-                                dists = dists.reshape((pt_num, saved_topk))
+                                        if main_saved_topk > self.temporal_topk:
+                                            main_keep_num = self.temporal_topk
+                                        else:
+                                            main_keep_num = main_saved_topk
 
-                                if saved_topk > self.temporal_topk:
-                                    keep_num = self.temporal_topk
+                                        _main_curr_pts_ins = main_curr_pts_ins[:, :main_keep_num, :].flatten(0, 1)
+                                        _main_next_pts_ins = main_next_pts_ins[:, :main_keep_num, :].flatten(0, 1)
+                                        _main_dists = main_dists[:, :main_keep_num].flatten(0, 1)
+
+                                        # # filter matching by correlations
+                                        # main_keep_inds = torch.where(_main_dists < self.temp_dist_thr)[0]
+                                        #
+                                        # _main_curr_pts_ins = _main_curr_pts_ins[main_keep_inds]
+                                        # _main_next_pts_ins = _main_next_pts_ins[main_keep_inds]
+                                    else:
+                                        _main_curr_pts_ins = torch.zeros((0, 2))
+                                        _main_next_pts_ins = torch.zeros((0, 2))
+
+                                    # sub
+                                    sub_contents = _match_contents["sub"]
+                                    sub_curr_pts_ins = torch.as_tensor(
+                                        np.ascontiguousarray(np.array(sub_contents["curr_pts"]) * scale_factor)
+                                    )
+                                    sub_next_pts_ins = torch.as_tensor(
+                                        np.ascontiguousarray(np.array(sub_contents["next_pts"]) * scale_factor)
+                                    )
+                                    sub_dists = torch.as_tensor(
+                                        np.ascontiguousarray(np.array(sub_contents["dist"]))
+                                    )
+                                    sub_saved_topk = sub_contents["topk"]
+                                    assert sub_curr_pts_ins.shape == sub_next_pts_ins.shape
+
+                                    if sub_curr_pts_ins.shape[0] != 0:
+                                        if do_hflip:
+                                            sub_curr_pts_ins[:, 0] = image_shape[1] - (sub_curr_pts_ins[:, 0] + 1)
+                                            sub_next_pts_ins[:, 0] = image_shape[1] - (sub_next_pts_ins[:, 0] + 1)
+
+                                        if not self.use_input_resolution_for_temp:
+                                            sub_curr_pts_ins *= 0.25
+                                            sub_next_pts_ins *= 0.25
+
+                                        assert sub_curr_pts_ins.shape[0] % sub_saved_topk == 0
+                                        sub_pt_num = int(sub_curr_pts_ins.shape[0] / sub_saved_topk)
+
+                                        sub_curr_pts_ins = sub_curr_pts_ins.reshape((sub_pt_num, sub_saved_topk, 2))
+                                        sub_next_pts_ins = sub_next_pts_ins.reshape((sub_pt_num, sub_saved_topk, 2))
+                                        sub_dists = sub_dists.reshape((sub_pt_num, sub_saved_topk))
+
+                                        if sub_saved_topk > self.temporal_topk:
+                                            sub_keep_num = self.temporal_topk
+                                        else:
+                                            sub_keep_num = sub_saved_topk
+
+                                        _sub_curr_pts_ins = sub_curr_pts_ins[:, :sub_keep_num, :].flatten(0, 1)
+                                        _sub_next_pts_ins = sub_next_pts_ins[:, :sub_keep_num, :].flatten(0, 1)
+                                        _sub_dists = sub_dists[:, :sub_keep_num].flatten(0, 1)
+
+                                        # # filter matching by correlations
+                                        # sub_keep_inds = torch.where(_sub_dists < self.temp_dist_thr)[0]
+                                        #
+                                        # _sub_curr_pts_ins = _sub_curr_pts_ins[sub_keep_inds]
+                                        # _sub_next_pts_ins = _sub_next_pts_ins[sub_keep_inds]
+                                    else:
+                                        _sub_curr_pts_ins = torch.zeros((0, 2))
+                                        _sub_next_pts_ins = torch.zeros((0, 2))
+
+                                    _curr_pts_ins = torch.cat([_main_curr_pts_ins, _sub_curr_pts_ins], dim=0)
+                                    _next_pts_ins = torch.cat([_main_next_pts_ins, _sub_next_pts_ins], dim=0)
+
                                 else:
-                                    keep_num = saved_topk
+                                    # grab the matching coordinates and apply transform
+                                    curr_pts_ins = torch.as_tensor(
+                                        np.ascontiguousarray(np.array(_match_contents["curr_pts"]) * scale_factor)
+                                    )
+                                    next_pts_ins = torch.as_tensor(
+                                        np.ascontiguousarray(np.array(_match_contents["next_pts"]) * scale_factor)
+                                    )
+                                    dists = torch.as_tensor(
+                                        np.ascontiguousarray(np.array(_match_contents["corr"]))
+                                    )
+                                    assert curr_pts_ins.shape == next_pts_ins.shape
 
-                                _curr_pts_ins = curr_pts_ins[:, :keep_num, :].flatten(0, 1)
-                                _next_pts_ins = next_pts_ins[:, :keep_num, :].flatten(0, 1)
-                                _dists = dists[:, :keep_num].flatten(0, 1)
+                                    if do_hflip:
+                                        curr_pts_ins[:, 0] = image_shape[1] - (curr_pts_ins[:, 0] + 1)
+                                        next_pts_ins[:, 0] = image_shape[1] - (next_pts_ins[:, 0] + 1)
 
-                                # filter matching by correlations
-                                keep_inds = torch.where(_dists < self.temp_dist_thr)[0]
-                                # print('\n keep proportion: ', keep_inds.shape[0] / (corrs.shape[0] + 1))
+                                    if not self.use_input_resolution_for_temp:
+                                        curr_pts_ins *= 0.25
+                                        next_pts_ins *= 0.25
 
-                                _curr_pts_ins = _curr_pts_ins[keep_inds]
-                                _next_pts_ins = _next_pts_ins[keep_inds]
+                                    # 选取topk个点
+                                    saved_topk = _match_contents["topk"]
+                                    assert curr_pts_ins.shape[0] % saved_topk == 0
+                                    pt_num = int(curr_pts_ins.shape[0] / saved_topk)
+
+                                    curr_pts_ins = curr_pts_ins.reshape((pt_num, saved_topk, 2))
+                                    next_pts_ins = next_pts_ins.reshape((pt_num, saved_topk, 2))
+                                    dists = dists.reshape((pt_num, saved_topk))
+
+                                    if saved_topk > self.temporal_topk:
+                                        keep_num = self.temporal_topk
+                                    else:
+                                        keep_num = saved_topk
+
+                                    _curr_pts_ins = curr_pts_ins[:, :keep_num, :].flatten(0, 1)
+                                    _next_pts_ins = next_pts_ins[:, :keep_num, :].flatten(0, 1)
+                                    _dists = dists[:, :keep_num].flatten(0, 1)
+
+                                    # # filter matching by correlations
+                                    # keep_inds = torch.where(_dists < self.temp_dist_thr)[0]
+                                    #
+                                    # _curr_pts_ins = _curr_pts_ins[keep_inds]
+                                    # _next_pts_ins = _next_pts_ins[keep_inds]
 
                                 dataset_dict['match_coords'][_id][f_i]["curr_pts"] = _curr_pts_ins.ceil().to(
                                     dtype=torch.int16

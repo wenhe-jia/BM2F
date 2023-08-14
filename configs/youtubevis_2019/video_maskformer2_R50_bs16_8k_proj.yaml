@@ -1,0 +1,7 @@
+_BASE_: video_maskformer2_R50_bs16_8ep.yaml
+MODEL:
+  WEIGHTS: "weights/model_final_3c8ec9.pkl"
+  MASK_FORMER:
+    SUP_TYPE: "mask_projection"
+    WEAK_SUPERVISION:
+      PROJECTION_WEIGHT: 5.0
