@@ -366,10 +366,12 @@ class VideoMaskFormer(nn.Module):
         images = [(x - self.pixel_mean) / self.pixel_std for x in org_images]
         images = ImageList.from_tensors(images, self.size_divisibility)
 
-        features = self.backbone(images.tensor)
-        outputs = self.sem_seg_head(features)
+
 
         if self.training:
+            features = self.backbone(images.tensor)
+            outputs = self.sem_seg_head(features)
+
             # mask classification target
             if self.weak_supervision:
                 targets = self.prepare_weaksup_targets(batched_inputs, org_images)
@@ -803,11 +805,13 @@ class VideoMaskFormer(nn.Module):
             if i + self.num_frames_test > len(images_tensor):
                 break
 
+            # forward {num_frames_window_test} frames with backbone at once
             if i + self.num_frames_test > end_idx_window:
                 start_idx_window, end_idx_window = i, i + self.num_frames_window_test
                 frame_idx_window = range(start_idx_window, end_idx_window)
                 features_window = self.backbone(images_tensor[start_idx_window:end_idx_window])
 
+            # forward {num_frames_test} frames with sem_seg_head at once, with overlap of {num_frames_test - 1} frames
             features = {k: v[frame_idx_window.index(i):frame_idx_window.index(i)+self.num_frames_test]
                         for k, v in features_window.items()}
             out = self.sem_seg_head(features)

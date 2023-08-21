@@ -1,6 +1,6 @@
-_BASE_: video_maskformer2_R50_bs16_8ep.yaml
+_BASE_: video_maskformer2_R101_bs16_8ep.yaml
 MODEL:
-  WEIGHTS: "weights/model_final_3c8ec9.pkl"
+  WEIGHTS: "weights/model_final_eba159.pkl"
   MASK_FORMER:
     SUP_TYPE: "mask_projection_and_STpairwise"
     WEAK_SUPERVISION:
@@ -14,14 +14,11 @@ MODEL:
   MASK_FORMER_VIDEO:
     WEAK_SUPERVISION:
       TEMPORAL_PAIRWISE_WEIGHT: 1.0
-SOLVER:
-  IMS_PER_BATCH: 8
-  BASE_LR: 0.00005  # 0.0001
-  STEPS: (11000,)
-  MAX_ITER: 16000
-  CHECKPOINT_PERIOD: 8000
-TEST:
-  EVAL_PERIOD: 2000
 INPUT:
   DATASET_MAPPER_NAME: "video_instance_with_temp_coords"
   FIXED_SAMPLING_INTERVAL: True
+SOLVER:
+  IMS_PER_BATCH: 8  # 16
+  BASE_LR: 0.00005  # 0.0001
+  STEPS: (8000,)  # (4000,)
+  MAX_ITER: 12000  # 6000

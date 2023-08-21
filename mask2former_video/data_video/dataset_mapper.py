@@ -164,7 +164,7 @@ class YTVISDatasetMapperWithCoords:
         #     temporal_topk,
         #     sampling_frame_num
         # )
-        matching_file_path = "matching_coords_vitg_ShortRange_NormDistPCA_top10_frame3"
+        matching_file_path = "matching_coords_vitg_ShortRange_NormDist_top10_frame3"
         self.matching_file_path = matching_file_path
         assert self.temporal_topk >= 1
 

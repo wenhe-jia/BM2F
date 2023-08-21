@@ -37,7 +37,7 @@ _PREDEFINED_SPLITS_YTVIS_2021 = {
 # ==== Predefined splits for OVIS ===========
 _PREDEFINED_SPLITS_OVIS = {
     "ovis_train": ("ovis/train/JPEGImages",
-                   "ovis/train.json"),  # 90% videos in training set
+                   "ovis/train.json"),
     "ovis_val": ("ovis/valid/JPEGImages",
                  "ovis/valid.json"),
     "ovis_test": ("ovis/test/JPEGImages",
