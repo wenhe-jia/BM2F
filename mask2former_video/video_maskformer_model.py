@@ -389,19 +389,19 @@ class VideoMaskFormer(nn.Module):
                     losses.pop(k)
 
             ##### DEBUG #####
-            if self.temporal_pairwise:
-                temppair_vid = targets[0]["total_temp_pair"]
-                pos_temppair_vid = targets[0]["pos_temp_pair"]
-                for i in range(1, len(targets)):
-                    temppair_vid += targets[i]["total_temp_pair"]
-                    pos_temppair_vid += targets[i]["pos_temp_pair"]
-                losses.update(
-                    {
-                        "loss_pos_temp_pair_prop": (pos_temppair_vid / torch.clamp(temppair_vid, min=1.0)).detach(),
-                        "loss_temp_pair_per_batch": temppair_vid.detach(),
-
-                    }
-                )
+            # if self.temporal_pairwise:
+            #     temppair_vid = targets[0]["total_temp_pair"]
+            #     pos_temppair_vid = targets[0]["pos_temp_pair"]
+            #     for i in range(1, len(targets)):
+            #         temppair_vid += targets[i]["total_temp_pair"]
+            #         pos_temppair_vid += targets[i]["pos_temp_pair"]
+            #     losses.update(
+            #         {
+            #             "loss_pos_temp_pair_prop": (pos_temppair_vid / torch.clamp(temppair_vid, min=1.0)).detach(),
+            #             "loss_temp_pair_per_batch": temppair_vid.detach(),
+            #
+            #         }
+            #     )
 
             return losses
         else:
@@ -639,15 +639,15 @@ class VideoMaskFormer(nn.Module):
 
                         ##### DEBUG #####
                         # ----- calculate positive pair -----
-                        num_match_per_video += torch.tensor(
-                            curr_pts.shape[0], dtype=torch.float32, device=self.device
-                        )
-                        num_pos_match_per_video += calculate_matching_pos(
-                            curr_pts,
-                            next_pts,
-                            gt_masks_full_per_video[ins_i, match_ind].float(),
-                            gt_masks_full_per_video[ins_i, match_ind + 1].float(),
-                        ).clone().detach()
+                        # num_match_per_video += torch.tensor(
+                        #     curr_pts.shape[0], dtype=torch.float32, device=self.device
+                        # )
+                        # num_pos_match_per_video += calculate_matching_pos(
+                        #     curr_pts,
+                        #     next_pts,
+                        #     gt_masks_full_per_video[ins_i, match_ind].float(),
+                        #     gt_masks_full_per_video[ins_i, match_ind + 1].float(),
+                        # ).clone().detach()
 
                         # ----- vis pairs -----
                         # save_path = "/home/jiawenhe/projects/weaksup-vis/Weakly-Sup-VIS/DEBUG/vis_train/{}".format(
@@ -718,8 +718,8 @@ class VideoMaskFormer(nn.Module):
                     "bottom_bounds": bottom_bounds_per_video[valid_idx].float(),
                     "color_similarities": color_similarity_per_video,
                     "temporal_pairs": temp_pairs,
-                    "total_temp_pair": num_match_per_video,
-                    "pos_temp_pair": num_pos_match_per_video,
+                    # "total_temp_pair": num_match_per_video,
+                    # "pos_temp_pair": num_pos_match_per_video,
                 }
             )
         return gt_instances

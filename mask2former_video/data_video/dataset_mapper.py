@@ -216,18 +216,25 @@ class YTVISDatasetMapperWithCoords:
             if self.fixed_sampling_interval:
                 # frame2, fix interval sampling
                 if self.sampling_frame_num == 2:
-                    if 0 < video_length <= 10:
-                        interval = 4
-                    elif 10 < video_length <= 20:
-                        interval = 10
-                    elif 20 < video_length <= 30:
-                        interval = 15
-                    elif 30 < video_length <= 40:
-                        interval = 20
-                    elif 40 < video_length:
-                        interval = 36
+                    if 0 < video_length <= 8:
+                        interval = 2
+                    elif 8 < video_length <= 16:
+                        interval = 3
                     else:
-                        raise ValueError("video length is not valid")
+                        interval = 5
+
+                    # if 0 < video_length <= 10:
+                    #     interval = 4
+                    # elif 10 < video_length <= 20:
+                    #     interval = 10
+                    # elif 20 < video_length <= 30:
+                    #     interval = 15
+                    # elif 30 < video_length <= 40:
+                    #     interval = 20
+                    # elif 40 < video_length:
+                    #     interval = 36
+                    # else:
+                    #     raise ValueError("video length is not valid")
 
                     ref_frame = random.randrange(video_length - interval)
                     tgt_frame = ref_frame + interval

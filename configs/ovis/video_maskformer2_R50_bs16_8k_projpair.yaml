@@ -11,3 +11,7 @@ MODEL:
         DILATION: 2
         COLOR_THRESH: 0.3
         WARMUP_ITERS: 4000
+  MASK_FORMER_VIDEO:
+    TEST:
+      TRACKER_TYPE: "minvis"
+      MERGE_ON_CPU: True
