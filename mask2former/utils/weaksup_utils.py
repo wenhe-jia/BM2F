@@ -9,6 +9,9 @@ def unfold_wo_center(x, kernel_size, dilation):
     assert x.dim() == 4
     assert kernel_size % 2 == 1
 
+    N, C, H, W = x.shape
+    E = kernel_size ** 2
+
     # using SAME padding
     padding = (kernel_size + (dilation - 1) * (kernel_size - 1)) // 2
     unfolded_x = F.unfold(
@@ -17,15 +20,12 @@ def unfold_wo_center(x, kernel_size, dilation):
         dilation=dilation
     )  # (N, C, H, W) --unfold--> (N, C*k*k, H*W)
 
-    unfolded_x = unfolded_x.reshape(
-        x.size(0), x.size(1), -1, x.size(2), x.size(3)
-    )  # (N, C*k*k, H*W) --> (N, C, k*k, H, W)
+    unfolded_x = unfolded_x.reshape(N, C, E, H, W)
 
     # remove the center pixels
-    size = kernel_size ** 2
     unfolded_x = torch.cat((
-        unfolded_x[:, :, :size // 2],
-        unfolded_x[:, :, size // 2 + 1:]
+        unfolded_x[:, :, :E // 2],
+        unfolded_x[:, :, E // 2 + 1:]
     ), dim=2)  # (N, C, k*k-1, H, W)
 
     return unfolded_x

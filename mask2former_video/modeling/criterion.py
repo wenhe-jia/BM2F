@@ -371,59 +371,59 @@ class VideoSetCriterionProjSTPair(nn.Module):
         target_top_bounds = target_top_bounds.flatten()  # (NTW)
         target_bottom_bounds = target_bottom_bounds.flatten()  # (NTW)
 
-        if src_idx[0].shape[0] > 0:
-            """
-                bellow is for original projection loss
-            """
-            # src_masks_y = src_masks.max(dim=3, keepdim=True)[0].flatten(1)
-            # src_masks_x = src_masks.max(dim=2, keepdim=True)[0].flatten(1)
-            #
-            # with torch.no_grad():
-            #     target_boxmasks_y = target_boxmasks.max(dim=3, keepdim=True)[0].flatten(1)
-            #     target_boxmasks_x = target_boxmasks.max(dim=2, keepdim=True)[0].flatten(1)
+        # if src_idx[0].shape[0] > 0:
+        """
+            bellow is for original projection loss
+        """
+        # src_masks_y = src_masks.max(dim=3, keepdim=True)[0].flatten(1)
+        # src_masks_x = src_masks.max(dim=2, keepdim=True)[0].flatten(1)
+        #
+        # with torch.no_grad():
+        #     target_boxmasks_y = target_boxmasks.max(dim=3, keepdim=True)[0].flatten(1)
+        #     target_boxmasks_x = target_boxmasks.max(dim=2, keepdim=True)[0].flatten(1)
 
-            """
-                bellow is for projection limited label loss
-            """
-            NT = src_masks.shape[0]
-            H = src_masks.shape[2]
-            W = src_masks.shape[3]
+        """
+            bellow is for projection limited label loss
+        """
+        NT = src_masks.shape[0]
+        H = src_masks.shape[2]
+        W = src_masks.shape[3]
 
-            src_masks_y, max_inds_x = src_masks.max(dim=3, keepdim=True)  # (NT, 1, H, 1), (NT, 1, H, 1)
-            src_masks_x, max_inds_y = src_masks.max(dim=2, keepdim=True)  # (NT, 1, 1, W), (NT, 1, 1, W)
+        src_masks_y, max_inds_x = src_masks.max(dim=3, keepdim=True)  # (NT, 1, H, 1), (NT, 1, H, 1)
+        src_masks_x, max_inds_y = src_masks.max(dim=2, keepdim=True)  # (NT, 1, 1, W), (NT, 1, 1, W)
 
-            src_masks_y = src_masks_y.flatten(1)  # (NT, H)
-            src_masks_x = src_masks_x.flatten(1)  # (NT, W)
-            max_inds_x = max_inds_x.flatten()  # (NTW)
-            max_inds_y = max_inds_y.flatten()  # (NTH)
+        src_masks_y = src_masks_y.flatten(1)  # (NT, H)
+        src_masks_x = src_masks_x.flatten(1)  # (NT, W)
+        max_inds_x = max_inds_x.flatten()  # (NTW)
+        max_inds_y = max_inds_y.flatten()  # (NTH)
 
-            with torch.no_grad():
-                flag_l = max_inds_x >= target_left_bounds
-                flag_r = max_inds_x < target_right_bounds
-                flag_y = (flag_l * flag_r).view(NT, H)
+        with torch.no_grad():
+            flag_l = max_inds_x >= target_left_bounds
+            flag_r = max_inds_x < target_right_bounds
+            flag_y = (flag_l * flag_r).view(NT, H)
 
-                flag_t = max_inds_y >= target_top_bounds
-                flag_b = max_inds_y < target_bottom_bounds
-                flag_x = (flag_t * flag_b).view(NT, W)
+            flag_t = max_inds_y >= target_top_bounds
+            flag_b = max_inds_y < target_bottom_bounds
+            flag_x = (flag_t * flag_b).view(NT, W)
 
-                target_boxmasks_y = target_boxmasks.max(dim=3, keepdim=True)[0].flatten(1) * flag_y  # (NT, W)
-                target_boxmasks_x = target_boxmasks.max(dim=2, keepdim=True)[0].flatten(1) * flag_x  # (NT, H)
+            target_boxmasks_y = target_boxmasks.max(dim=3, keepdim=True)[0].flatten(1) * flag_y  # (NT, W)
+            target_boxmasks_x = target_boxmasks.max(dim=2, keepdim=True)[0].flatten(1) * flag_x  # (NT, H)
 
-            losses = {
-                "loss_mask_projection": projection2D_dice_loss_jit(
-                    src_masks_x, target_boxmasks_x,
-                    src_masks_y, target_boxmasks_y,
-                    num_masks
-                )
-            }
+        losses = {
+            "loss_mask_projection": projection2D_dice_loss_jit(
+                src_masks_x, target_boxmasks_x,
+                src_masks_y, target_boxmasks_y,
+                num_masks
+            )
+        }
 
-            del src_masks_x, src_masks_y
-            del target_boxmasks_x, target_boxmasks_y
-        else:
-            """
-            bellow is for original projection loss and limited projection loss
-            """
-            losses = {"loss_mask_projection": torch.tensor([0], dtype=torch.float32, device=src_masks.device)}
+        del src_masks_x, src_masks_y
+        del target_boxmasks_x, target_boxmasks_y
+        # else:
+        #     """
+        #     bellow is for original projection loss and limited projection loss
+        #     """
+        #     losses = {"loss_mask_projection": torch.tensor([0], dtype=torch.float32, device=src_masks.device)}
 
         del src_masks
         del target_boxmasks
@@ -449,22 +449,19 @@ class VideoSetCriterionProjSTPair(nn.Module):
             [t['color_similarities'][i] for t, (_, i) in zip(targets, indices)]
         )  # (N, T, k*k-1, H, W)
 
-        if src_idx[0].shape[0] > 0:
-            with torch.no_grad():
-                target_similarities = (target_similarities >= self.pairwise_color_thresh).float() * \
-                                      target_boxmasks[:, :, None].float()
+        with torch.no_grad():
+            target_similarities = (target_similarities >= self.pairwise_color_thresh).float() * \
+                                  target_boxmasks[:, :, None].float()
 
-            src_similarities = calculate_pred_similaries_video(src_masks, self.pairwise_size, self.pairwise_dilation)
+        src_similarities = calculate_pred_similaries_video(src_masks, self.pairwise_size, self.pairwise_dilation)
 
-            warmup_factor = min(self._iter.item() / float(self.pairwise_warmup_iters), 1.0)
-            losses = {
-                "loss_mask_pairwise":
-                    pairwise_loss_jit(src_similarities, target_similarities, num_masks) * warmup_factor
-            }
+        warmup_factor = min(self._iter.item() / float(self.pairwise_warmup_iters), 1.0)
+        losses = {
+            "loss_mask_pairwise":
+                pairwise_loss_jit(src_similarities, target_similarities, num_masks) * warmup_factor
+        }
 
-            del src_similarities
-        else:
-            losses = {"loss_mask_pairwise": torch.tensor([0], dtype=torch.float32, device=src_masks.device)}
+        del src_similarities
 
         del src_masks
         del target_boxmasks
@@ -616,9 +613,10 @@ class VideoSetCriterionProjSTPair(nn.Module):
         indices = self.matcher(outputs_without_aux, targets)
 
         # Compute the average number of target boxes accross all nodes, for normalization purposes
-        num_masks = sum(len(t["labels"]) for t in targets)
+        _num_masks = sum(len(t["labels"]) for t in targets)
+        # print('clip  before gather |  iter: ', self._iter, ' | num_masks: ', _num_masks)
         num_masks = torch.as_tensor(
-            [num_masks], dtype=torch.float, device=next(iter(outputs.values())).device
+            [_num_masks], dtype=torch.float, device=next(iter(outputs.values())).device
         )
         if is_dist_avail_and_initialized():
             torch.distributed.all_reduce(num_masks)
@@ -638,6 +636,10 @@ class VideoSetCriterionProjSTPair(nn.Module):
                     l_dict = {k + f"_{i}": v for k, v in l_dict.items()}
                     losses.update(l_dict)
         self._iter += 1
+
+        if _num_masks == 0:
+            print("iter: {}, num tgt: {} ".format(self._iter, _num_masks))
+
         return losses
 
     def __repr__(self):
