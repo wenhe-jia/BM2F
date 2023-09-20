@@ -164,7 +164,8 @@ class YTVISDatasetMapperWithCoords:
         #     temporal_topk,
         #     sampling_frame_num
         # )
-        matching_file_path = "matching_coords_vitg_ShortRange_NormDist_top10_frame3"
+        # matching_file_path = "matching_coords_vitg_ShortRange_NormDist_top10_frame3"
+        matching_file_path = "matching_coords_liir_r18_ShortRange_NormDist_top5_frame3"
         self.matching_file_path = matching_file_path
         assert self.temporal_topk >= 1
 
@@ -661,47 +662,47 @@ class YTVISDatasetMapper:
             # selected_idx = [ref_frame, tgt_frame]
 
             # frame 3, fix interval sampling
-            if 0 < video_length <= 8:
-                interval = 2
-            elif 8 < video_length <= 16:
-                interval = 3
-
+            # if 0 < video_length <= 8:
+            #     interval = 2
+            # elif 8 < video_length <= 16:
+            #     interval = 3
+            #
+            # # else:
+            # #     interval = 5
+            #
+            # elif 16 < video_length <= 24:
+            #     interval = 7
+            # elif 24 < video_length <= 32:
+            #     interval = 10
+            # elif 32 < video_length <= 40:
+            #     interval = 14
+            # elif 40 < video_length <= 48:
+            #     interval = 18
+            # elif 48 < video_length:
+            #     interval = 23
             # else:
-            #     interval = 5
-
-            elif 16 < video_length <= 24:
-                interval = 7
-            elif 24 < video_length <= 32:
-                interval = 10
-            elif 32 < video_length <= 40:
-                interval = 14
-            elif 40 < video_length <= 48:
-                interval = 18
-            elif 48 < video_length:
-                interval = 23
-            else:
-                raise ValueError("video length is not valid")
-
-            ref_frame = random.randrange(video_length - 2 * interval)
-            first_tgt_frame = ref_frame + interval
-            second_tgt_frame = first_tgt_frame + interval
-            selected_idx = [ref_frame, first_tgt_frame, second_tgt_frame]
+            #     raise ValueError("video length is not valid")
+            #
+            # ref_frame = random.randrange(video_length - 2 * interval)
+            # first_tgt_frame = ref_frame + interval
+            # second_tgt_frame = first_tgt_frame + interval
+            # selected_idx = [ref_frame, first_tgt_frame, second_tgt_frame]
 
 
             # random adaptive sampling
-            # ref_frame = random.randrange(video_length)
-            #
-            # start_idx = max(0, ref_frame-self.sampling_frame_range)
-            # end_idx = min(video_length, ref_frame+self.sampling_frame_range + 1)
-            #
-            # selected_idx = np.random.choice(
-            #     np.array(list(range(start_idx, ref_frame)) + list(range(ref_frame+1, end_idx))),
-            #     self.sampling_frame_num - 1,
-            # )
-            # selected_idx = selected_idx.tolist() + [ref_frame]
-            # selected_idx = sorted(selected_idx)
-            # if self.sampling_frame_shuffle:
-            #     random.shuffle(selected_idx)
+            ref_frame = random.randrange(video_length)
+
+            start_idx = max(0, ref_frame-self.sampling_frame_range)
+            end_idx = min(video_length, ref_frame+self.sampling_frame_range + 1)
+
+            selected_idx = np.random.choice(
+                np.array(list(range(start_idx, ref_frame)) + list(range(ref_frame+1, end_idx))),
+                self.sampling_frame_num - 1,
+            )
+            selected_idx = selected_idx.tolist() + [ref_frame]
+            selected_idx = sorted(selected_idx)
+            if self.sampling_frame_shuffle:
+                random.shuffle(selected_idx)
         else:
             selected_idx = range(video_length)
 

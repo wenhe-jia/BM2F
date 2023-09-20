@@ -296,6 +296,7 @@ class VideoHungarianMatcherProjPair(nn.Module):
             pairwise_dilation: int = 2,
             pairwise_color_thresh: float = 0.3,
             pairwise_warmup_iters: int = 10000,
+            spatial_label_rectf: bool = False,
     ):
         """Creates the matcher
 
@@ -313,6 +314,8 @@ class VideoHungarianMatcherProjPair(nn.Module):
         self.pairwise_dilation = pairwise_dilation
         self.pairwise_color_thresh = pairwise_color_thresh
         self.pairwise_warmup_iters = pairwise_warmup_iters
+
+        self.spatial_label_rectf = spatial_label_rectf
 
         assert cost_class != 0 or cost_projection != 0 or cost_pairwise != 0, "all costs cant be 0"
 
@@ -340,27 +343,29 @@ class VideoHungarianMatcherProjPair(nn.Module):
 
             # gt masks are already padded when preparing target
             tgt_boxmask = targets[b]["box_masks"].to(out_mask)  # (G, T, H, W), 有可能有空的mask(dummy)
-            tgt_left_bounds = targets[b]["left_bounds"].to(out_mask)  # (G, T, H)
-            tgt_right_bounds = targets[b]["right_bounds"].to(out_mask)  # (G, T, H)
-            tgt_top_bounds = targets[b]["top_bounds"].to(out_mask)  # (G, T, W)
-            tgt_bottom_bounds = targets[b]["bottom_bounds"].to(out_mask)  # (G, T, W)
+            if self.spatial_label_rectf:
+                tgt_left_bounds = targets[b]["left_bounds"].to(out_mask)  # (G, T, H)
+                tgt_right_bounds = targets[b]["right_bounds"].to(out_mask)  # (G, T, H)
+                tgt_top_bounds = targets[b]["top_bounds"].to(out_mask)  # (G, T, W)
+                tgt_bottom_bounds = targets[b]["bottom_bounds"].to(out_mask)  # (G, T, W)
             tgt_similarities = targets[b]["color_similarities"].to(out_mask)  # (G, T, k*k-1, H, W)
 
             if tgt_ids.shape[0] > 0:
                 with autocast(enabled=False):
                     ##### projection #####
-                    # original projection
-                    # cost_projection = batch_axis_projection(out_mask, tgt_boxmask, 3) +  \
-                    #                   batch_axis_projection(out_mask, tgt_boxmask, 2)
-
-                    # projection limited label
-                    cost_projection = \
-                        batch_axis_projection_limited_label(
-                            out_mask, tgt_boxmask, tgt_left_bounds, tgt_right_bounds, axis=-1
-                        ) + \
-                        batch_axis_projection_limited_label(
-                            out_mask, tgt_boxmask, tgt_top_bounds, tgt_bottom_bounds, axis=-2
-                        )
+                    if not self.spatial_label_rectf:
+                        # original projection
+                        cost_projection = batch_axis_projection(out_mask, tgt_boxmask, 3) +  \
+                                          batch_axis_projection(out_mask, tgt_boxmask, 2)
+                    else:
+                        # projection limited label
+                        cost_projection = \
+                            batch_axis_projection_limited_label(
+                                out_mask, tgt_boxmask, tgt_left_bounds, tgt_right_bounds, axis=-1
+                            ) + \
+                            batch_axis_projection_limited_label(
+                                out_mask, tgt_boxmask, tgt_top_bounds, tgt_bottom_bounds, axis=-2
+                            )
 
                     ##### color similarity #####
                     warmup_factor = min(self._iter.item() / float(self.pairwise_warmup_iters), 1.0)
@@ -434,7 +439,7 @@ class VideoHungarianMatcherProj(nn.Module):
     while the others are un-matched (and thus treated as non-objects).
     """
 
-    def __init__(self, cost_class: float = 1, cost_projection: float = 1):
+    def __init__(self, cost_class: float = 1, cost_projection: float = 1, spatial_label_rectf: bool = False):
         """Creates the matcher
 
         Params:
@@ -445,6 +450,7 @@ class VideoHungarianMatcherProj(nn.Module):
         super().__init__()
         self.cost_class = cost_class
         self.cost_projection = cost_projection
+        self.spatial_label_rectf = spatial_label_rectf
 
         assert cost_class != 0 or cost_projection != 0, "all costs cant be 0"
 
@@ -468,25 +474,27 @@ class VideoHungarianMatcherProj(nn.Module):
             out_mask = outputs["pred_masks"][b]  # [num_queries, T, H_pred, W_pred]
             # gt masks are already padded when preparing target
             tgt_boxmask = targets[b]["box_masks"].to(out_mask)  # [num_gts, T, H_pred, W_pred], 有可能有空的mask(dummy)
-            tgt_left_bounds = targets[b]["left_bounds"].to(out_mask)
-            tgt_right_bounds = targets[b]["right_bounds"].to(out_mask)
-            tgt_top_bounds = targets[b]["top_bounds"].to(out_mask)
-            tgt_bottom_bounds = targets[b]["bottom_bounds"].to(out_mask)
+            if self.spatial_label_rectf:
+                tgt_left_bounds = targets[b]["left_bounds"].to(out_mask)
+                tgt_right_bounds = targets[b]["right_bounds"].to(out_mask)
+                tgt_top_bounds = targets[b]["top_bounds"].to(out_mask)
+                tgt_bottom_bounds = targets[b]["bottom_bounds"].to(out_mask)
 
             if tgt_ids.shape[0] > 0:
                 with autocast(enabled=False):
-                    # original projection
-                    # cost_projection = batch_axis_projection(out_mask, tgt_boxmask, 3) + \
-                    #                   batch_axis_projection(out_mask, tgt_boxmask, 2)
-
-                    # projection limited label
-                    cost_projection = \
-                        batch_axis_projection_limited_label(
-                            out_mask, tgt_boxmask, tgt_left_bounds, tgt_right_bounds, axis=-1
-                        ) + \
-                        batch_axis_projection_limited_label(
-                            out_mask, tgt_boxmask, tgt_top_bounds, tgt_bottom_bounds, axis=-2
-                        )
+                    if not self.spatial_label_rectf:
+                        # original projection
+                        cost_projection = batch_axis_projection(out_mask, tgt_boxmask, 3) + \
+                                          batch_axis_projection(out_mask, tgt_boxmask, 2)
+                    else:
+                        # projection limited label
+                        cost_projection = \
+                            batch_axis_projection_limited_label(
+                                out_mask, tgt_boxmask, tgt_left_bounds, tgt_right_bounds, axis=-1
+                            ) + \
+                            batch_axis_projection_limited_label(
+                                out_mask, tgt_boxmask, tgt_top_bounds, tgt_bottom_bounds, axis=-2
+                            )
             else:
                 cost_projection = torch.zeros((num_queries, 0), dtype=torch.float32, device=out_prob.device)
 

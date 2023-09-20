@@ -59,6 +59,7 @@ class VideoMaskFormer(nn.Module):
         # video
         num_frames,
         output_dir,
+        spatial_label_rectf,
         pairwise_size,
         pairwise_dilation,
         temporal_pairwise,
@@ -124,6 +125,7 @@ class VideoMaskFormer(nn.Module):
         self.mask_out_stride = 4
         self.pairwise_size = pairwise_size
         self.pairwise_dilation = pairwise_dilation
+        self.spatial_label_rectf = spatial_label_rectf
 
         self.temporal_pairwise = temporal_pairwise
         self.use_input_resolution = use_input_resolution
@@ -223,6 +225,7 @@ class VideoMaskFormer(nn.Module):
             matcher = VideoHungarianMatcherProj(
                 cost_class=cfg.MODEL.MASK_FORMER.CLASS_WEIGHT,
                 cost_projection=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PROJECTION_WEIGHT,
+                spatial_label_rectf=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.SPATIAL_LABEL_RECTF_ENABLED,
             )
             losses = ["labels", "projection_masks"]
             criterion = VideoSetCriterionProj(
@@ -230,6 +233,7 @@ class VideoMaskFormer(nn.Module):
                 matcher=matcher,
                 weight_dict=weight_dict,
                 eos_coef=no_object_weight,
+                spatial_label_rectf=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.SPATIAL_LABEL_RECTF_ENABLED,
                 losses=losses,
             )
         elif supervision_type == "mask_projection_and_pairwise":
@@ -241,6 +245,7 @@ class VideoMaskFormer(nn.Module):
                 pairwise_dilation=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.DILATION,
                 pairwise_color_thresh=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.COLOR_THRESH,
                 pairwise_warmup_iters=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.WARMUP_ITERS,
+                spatial_label_rectf=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.SPATIAL_LABEL_RECTF_ENABLED,
             )
             losses = ["labels", "projection_masks", "pairwise"]
             criterion = VideoSetCriterionProjPair(
@@ -252,6 +257,7 @@ class VideoMaskFormer(nn.Module):
                 pairwise_dilation=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.DILATION,
                 pairwise_color_thresh=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.COLOR_THRESH,
                 pairwise_warmup_iters=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.WARMUP_ITERS,
+                spatial_label_rectf=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.SPATIAL_LABEL_RECTF_ENABLED,
                 losses=losses,
             )
         elif supervision_type == "mask_projection_and_STpairwise":
@@ -263,6 +269,7 @@ class VideoMaskFormer(nn.Module):
                 pairwise_dilation=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.DILATION,
                 pairwise_color_thresh=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.COLOR_THRESH,
                 pairwise_warmup_iters=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.WARMUP_ITERS,
+                spatial_label_rectf=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.SPATIAL_LABEL_RECTF_ENABLED,
             )
             losses = ["labels", "projection_masks", "pairwise", "temporal_pairwise"]
             criterion = VideoSetCriterionProjSTPair(
@@ -276,6 +283,7 @@ class VideoMaskFormer(nn.Module):
                 pairwise_warmup_iters=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.WARMUP_ITERS,
                 temporal_warmup=cfg.MODEL.MASK_FORMER_VIDEO.WEAK_SUPERVISION.WARM_UP,
                 use_input_resolution_for_temp=cfg.MODEL.MASK_FORMER_VIDEO.WEAK_SUPERVISION.USE_INPUT_RESOLUTION,
+                spatial_label_rectf=cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.SPATIAL_LABEL_RECTF_ENABLED,
                 losses=losses,
             )
         else:
@@ -297,6 +305,7 @@ class VideoMaskFormer(nn.Module):
             # video
             "num_frames": cfg.INPUT.SAMPLING_FRAME_NUM,
             "output_dir": cfg.OUTPUT_DIR,
+            "spatial_label_rectf": cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.SPATIAL_LABEL_RECTF_ENABLED,
             "pairwise_size": cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.SIZE,
             "pairwise_dilation": cfg.MODEL.MASK_FORMER.WEAK_SUPERVISION.PAIRWISE.DILATION,
             "temporal_pairwise": temporal_pairwise,
@@ -524,14 +533,15 @@ class VideoMaskFormer(nn.Module):
             mask_shape = [_num_instance, T, h_pad, w_pad]
             gt_boxmasks_full_per_video = torch.zeros(mask_shape, dtype=torch.float32, device=self.device)
             gt_masks_full_per_video = torch.zeros(mask_shape, dtype=torch.bool, device=self.device)
-            
-            x_bound_shape = [_num_instance, T, h_pad]
-            left_bounds_full_per_video = torch.zeros(x_bound_shape, dtype=torch.float32, device=self.device)
-            right_bounds_full_per_video = torch.zeros(x_bound_shape, dtype=torch.float32, device=self.device)
 
-            y_bound_shape = [_num_instance, T, w_pad]
-            top_bounds_full_per_video = torch.zeros(y_bound_shape, dtype=torch.float32, device=self.device)
-            bottom_bounds_full_per_video = torch.zeros(y_bound_shape, dtype=torch.float32, device=self.device)
+            if self.spatial_label_rectf:
+                x_bound_shape = [_num_instance, T, h_pad]
+                left_bounds_full_per_video = torch.zeros(x_bound_shape, dtype=torch.float32, device=self.device)
+                right_bounds_full_per_video = torch.zeros(x_bound_shape, dtype=torch.float32, device=self.device)
+
+                y_bound_shape = [_num_instance, T, w_pad]
+                top_bounds_full_per_video = torch.zeros(y_bound_shape, dtype=torch.float32, device=self.device)
+                bottom_bounds_full_per_video = torch.zeros(y_bound_shape, dtype=torch.float32, device=self.device)
 
             color_similarity_shape = [_num_instance, T, self.pairwise_size * self.pairwise_size - 1, _h, _w]
             color_similarity_per_video = torch.zeros(color_similarity_shape, dtype=torch.float32, device=self.device)
@@ -566,15 +576,16 @@ class VideoMaskFormer(nn.Module):
                             ins_i, f_i, int(gt_box[1]):int(gt_box[3] + 1), int(gt_box[0]):int(gt_box[2] + 1)
                         ] = 1.0
 
-                        gt_mask = gt_boxmasks_full_per_video[ins_i, f_i].int()  # (H, W)
-                        # bounds for y projection
-                        left_bounds_full_per_video[ins_i, f_i] = torch.argmax(gt_mask, dim=1)
-                        right_bounds_full_per_video[ins_i, f_i] = gt_mask.shape[1] - \
-                                                                   torch.argmax(gt_mask.flip(1), dim=1)
-                        # bounds for x projection
-                        top_bounds_full_per_video[ins_i, f_i] = torch.argmax(gt_mask, dim=0)
-                        bottom_bounds_full_per_video[ins_i, f_i] = gt_mask.shape[0] - \
-                                                              torch.argmax(gt_mask.flip(0), dim=0)
+                        if self.spatial_label_rectf:
+                            gt_mask = gt_boxmasks_full_per_video[ins_i, f_i].int()  # (H, W)
+                            # bounds for y projection
+                            left_bounds_full_per_video[ins_i, f_i] = torch.argmax(gt_mask, dim=1)
+                            right_bounds_full_per_video[ins_i, f_i] = gt_mask.shape[1] - \
+                                                                       torch.argmax(gt_mask.flip(1), dim=1)
+                            # bounds for x projection
+                            top_bounds_full_per_video[ins_i, f_i] = torch.argmax(gt_mask, dim=0)
+                            bottom_bounds_full_per_video[ins_i, f_i] = gt_mask.shape[0] - \
+                                                                  torch.argmax(gt_mask.flip(0), dim=0)
 
                         # color similarity for individual instance at current frame
                         color_similarity_per_video[ins_i, f_i] = frame_color_similarity
@@ -588,10 +599,11 @@ class VideoMaskFormer(nn.Module):
             # (G, T, h_pad/4, w_pad/4)
             gt_boxmasks_per_video = gt_boxmasks_full_per_video[:, :, start::stride, start::stride][valid_idx].float()
             gt_masks_per_video = gt_masks_full_per_video[:, :, start::stride, start::stride][valid_idx].float()
-            left_bounds_per_video = left_bounds_full_per_video[:, :, start::stride] / stride
-            right_bounds_per_video = right_bounds_full_per_video[:, :, start::stride] / stride
-            top_bounds_per_video = top_bounds_full_per_video[:, :, start::stride] / stride
-            bottom_bounds_per_video = bottom_bounds_full_per_video[:, :, start::stride] / stride
+            if self.spatial_label_rectf:
+                left_bounds_per_video = left_bounds_full_per_video[:, :, start::stride] / stride
+                right_bounds_per_video = right_bounds_full_per_video[:, :, start::stride] / stride
+                top_bounds_per_video = top_bounds_full_per_video[:, :, start::stride] / stride
+                bottom_bounds_per_video = bottom_bounds_full_per_video[:, :, start::stride] / stride
             color_similarity_per_video = color_similarity_per_video[valid_idx].float()
 
             # prepare temporal pairs
@@ -712,10 +724,10 @@ class VideoMaskFormer(nn.Module):
                     "masks": gt_masks_per_video,
                     "padded_input_height": h_pad,
                     "padded_input_width": w_pad,
-                    "left_bounds": left_bounds_per_video[valid_idx].float(),
-                    "right_bounds": right_bounds_per_video[valid_idx].float(),
-                    "top_bounds": top_bounds_per_video[valid_idx].float(),
-                    "bottom_bounds": bottom_bounds_per_video[valid_idx].float(),
+                    "left_bounds": left_bounds_per_video[valid_idx].float() if self.spatial_label_rectf else None,
+                    "right_bounds": right_bounds_per_video[valid_idx].float() if self.spatial_label_rectf else None,
+                    "top_bounds": top_bounds_per_video[valid_idx].float() if self.spatial_label_rectf else None,
+                    "bottom_bounds": bottom_bounds_per_video[valid_idx].float() if self.spatial_label_rectf else None,
                     "color_similarities": color_similarity_per_video,
                     "temporal_pairs": temp_pairs,
                     # "total_temp_pair": num_match_per_video,
